@@ -154,7 +154,7 @@ def clean_tags(text):
     return re.sub(r'\{.*?\}|<[^>]+>', '', text).strip()
 
 def process_subtitles_and_mux(video_path):
-    print("📝 Extracting/Downloading Subtitles...")
+    print("📝 Extracting Subtitles from Video...")
     eng_sub = "english.ass" 
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
@@ -164,9 +164,11 @@ def process_subtitles_and_mux(video_path):
         print("❌ Could not find a valid subtitle. Uploading original video without Sinhala subs.")
         return video_path
 
-    print("⚡ Fast Translating Subtitles...")
-    try: subs = pysubs2.load(valid_eng_sub)
-    except: return video_path
+    print("⚡ Translating to Sinhala...")
+    try: 
+        subs = pysubs2.load(valid_eng_sub)
+    except: 
+        return video_path
 
     unique_texts = list(set([clean_tags(e.text) for e in subs if clean_tags(e.text)]))
     translation_map = {}
@@ -177,7 +179,8 @@ def process_subtitles_and_mux(video_path):
             try:
                 translated = translator.translate_batch(chunk)
                 return {orig: trans for orig, trans in zip(chunk, translated)}
-            except: time.sleep(1)
+            except: 
+                time.sleep(1)
         return {orig: orig for orig in chunk}
 
     chunks = [unique_texts[i:i+40] for i in range(0, len(unique_texts), 40)]
@@ -191,25 +194,31 @@ def process_subtitles_and_mux(video_path):
     
     sin_sub = "sinhala.srt"
     subs.save(sin_sub)
-    print("✅ Translation Complete!")
+    print("✅ Sinhala Translation Complete!")
 
-    # MUXING: Preserve original tracks + Add Sinhala sub as primary
-    print("🎬 Muxing: Preserving original tracks & adding Sinhala sub...")
+    # Video එක තුළ පවතින Subtitle tracks ගණන පරීක්ෂා කිරීම
+    print("🎬 Muxing Sinhala subtitle into the video...")
+    probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', video_path]
+    probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    existing_sub_count = len(probe_res.stdout.strip().splitlines()) if probe_res.stdout.strip() else 0
+
     muxed_video = "muxed_video.mkv"
     
+    # Sinhala Subtitle Track එක අලුත්ම Track එක ලෙස (index = existing_sub_count) එක් කර Default ලෙස සැකසීම
     cmd = [
         'ffmpeg', '-i', video_path, '-i', sin_sub,
-        '-map', '0:v', '-map', '0:a', '-map', '0:s?', '-map', '1:s',
+        '-map', '0:v', '-map', '0:a', '-map', '0:s?', '-map', '1:s:0',
         '-c', 'copy', '-c:s', 'srt',
-        '-metadata:s:s:0', 'language=sin',
-        '-metadata:s:s:0', 'title=Sinhala',
+        f'-metadata:s:s:{existing_sub_count}', 'language=sin',
+        f'-metadata:s:s:{existing_sub_count}', 'title=Sinhala',
+        f'-disposition:s:{existing_sub_count}', 'default',
         muxed_video, '-y'
     ]
     
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     if os.path.exists(muxed_video):
-        print("✅ Subtitle Muxing Complete (Original Subs + Sinhala Track Added)!")
+        print("✅ Subtitle Muxing Complete!")
         return muxed_video
     else:
         print("⚠️ Muxing failed. Uploading original video.")
