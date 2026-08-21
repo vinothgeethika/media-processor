@@ -43,8 +43,10 @@ print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Job: {job_ty
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = "temp_subs"
+OUTPUT_DIR = "output_muxed"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def notify_failure(reason="failed"):
     try:
@@ -231,12 +233,18 @@ def process_subtitles_and_mux(video_path):
     subs.save(sin_sub)
     print("✅ Sinhala Translation Complete!")
 
-    print("🎬 Muxing: Adding Sinhala track & keeping original subtitles...")
+    # Original Filename එක ආරක්ෂා කරගනිමින් output path එක සැකසීම
+    original_filename = os.path.basename(video_path)
+    # Output container එක .mkv හෝ .mp4 ලෙස නිවැරදිව තබාගැනීම
+    base_name, _ = os.path.splitext(original_filename)
+    output_filename = f"{base_name}.mkv"
+    muxed_video_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    print(f"🎬 Muxing: Adding Sinhala track & keeping original filename [{output_filename}]...")
     probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', video_path]
     probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     existing_sub_count = len(probe_res.stdout.strip().splitlines()) if probe_res.stdout.strip() else 0
 
-    muxed_video = "muxed_video.mkv"
     cmd = [
         'ffmpeg', '-i', video_path, '-i', sin_sub,
         '-map', '0:v', '-map', '0:a', '-map', '0:s?', '-map', '1:s:0',
@@ -244,14 +252,14 @@ def process_subtitles_and_mux(video_path):
         f'-metadata:s:s:{existing_sub_count}', 'language=sin',
         f'-metadata:s:s:{existing_sub_count}', 'title=Sinhala',
         f'-disposition:s:{existing_sub_count}', 'default',
-        muxed_video, '-y'
+        muxed_video_path, '-y'
     ]
     
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    if os.path.exists(muxed_video):
-        print("✅ Subtitle Muxing Complete!")
-        return muxed_video
+    if os.path.exists(muxed_video_path):
+        print(f"✅ Subtitle Muxing Complete! Output: {output_filename}")
+        return muxed_video_path
     return video_path
 
 # --- 3. UPLOAD TO VIDEHIDE ---
@@ -264,10 +272,12 @@ def upload_to_videhide(final_video_path):
             return None
         
         upload_url = srv_resp["result"]
-        print(f"☁️ Uploading Video: {os.path.basename(final_video_path)}...")
+        upload_filename = os.path.basename(final_video_path)
+        print(f"☁️ Uploading Video as Original Name: {upload_filename}...")
+        
         with open(final_video_path, 'rb') as f:
             data = {'key': VIDEHIDE_API_KEY, 'fld_id': folder_id} if folder_id else {'key': VIDEHIDE_API_KEY}
-            up_resp = requests.post(upload_url, data=data, files={'file': (os.path.basename(final_video_path), f)}, timeout=600).json()
+            up_resp = requests.post(upload_url, data=data, files={'file': (upload_filename, f)}, timeout=600).json()
         
         print(f"📥 VideHide Response: {up_resp}")
         if up_resp.get("status") == 200:
@@ -311,6 +321,7 @@ if original_video:
         notify_success()
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
         if os.path.exists(TEMP_SUB_DIR): shutil.rmtree(TEMP_SUB_DIR)
+        if os.path.exists(OUTPUT_DIR): shutil.rmtree(OUTPUT_DIR)
         sys.exit(0)
     else:
         print("❌ Upload Failed!")
