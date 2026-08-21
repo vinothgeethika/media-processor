@@ -10,6 +10,7 @@ import zipfile
 import shutil
 import urllib.parse
 import concurrent.futures
+import mimetypes
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
@@ -277,9 +278,19 @@ def upload_to_streamhg(final_video_path):
         upload_filename = os.path.basename(final_video_path)
         print(f"☁️ Uploading Video as Original Name: {upload_filename}...")
         
+        mime_type, _ = mimetypes.guess_type(final_video_path)
+        if not mime_type:
+            mime_type = 'video/x-matroska' if final_video_path.endswith('.mkv') else 'video/mp4'
+
         with open(final_video_path, 'rb') as f:
-            data = {'key': STREAMHG_API_KEY, 'fld_id': folder_id} if folder_id else {'key': STREAMHG_API_KEY}
-            up_resp = requests.post(upload_url, data=data, files={'file': (upload_filename, f)}, timeout=600).json()
+            data = {'key': STREAMHG_API_KEY}
+            if folder_id:
+                data['fld_id'] = folder_id
+                
+            files = {
+                'file': (upload_filename, f, mime_type)
+            }
+            up_resp = requests.post(upload_url, data=data, files=files, timeout=600).json()
         
         print(f"📥 StreamHG Response: {up_resp}")
         if up_resp.get("status") == 200:
