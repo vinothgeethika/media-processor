@@ -25,8 +25,8 @@ firebase_admin.initialize_app(cred, {
 fs_db = firestore.client()
 
 # --- ⚙️ ENVIRONMENT VARIABLES & PAYLOAD ---
-VIDEHIDE_API_KEY = os.environ.get("VIDEHIDE_API_KEY")
-VIDEHIDE_BASE_URL = "https://earnvidsapi.com/api"
+STREAMHG_API_KEY = os.environ.get("STREAMHG_API_KEY")
+STREAMHG_BASE_URL = "https://streamhgapi.com/api"
 SUBDL_API_KEY = os.environ.get("SUBDL_API_KEY", "") 
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 
@@ -235,7 +235,6 @@ def process_subtitles_and_mux(video_path):
 
     # Original Filename එක ආරක්ෂා කරගනිමින් output path එක සැකසීම
     original_filename = os.path.basename(video_path)
-    # Output container එක .mkv හෝ .mp4 ලෙස නිවැරදිව තබාගැනීම
     base_name, _ = os.path.splitext(original_filename)
     output_filename = f"{base_name}.mkv"
     muxed_video_path = os.path.join(OUTPUT_DIR, output_filename)
@@ -262,11 +261,11 @@ def process_subtitles_and_mux(video_path):
         return muxed_video_path
     return video_path
 
-# --- 3. UPLOAD TO VIDEHIDE ---
-def upload_to_videhide(final_video_path):
+# --- 3. UPLOAD TO STREAMHG ---
+def upload_to_streamhg(final_video_path):
     print("☁️ Getting Upload Server...")
     try:
-        srv_resp = requests.get(f"{VIDEHIDE_BASE_URL}/upload/server?key={VIDEHIDE_API_KEY}", timeout=15).json()
+        srv_resp = requests.get(f"{STREAMHG_BASE_URL}/upload/server?key={STREAMHG_API_KEY}", timeout=15).json()
         if srv_resp.get("status") != 200: 
             print(f"❌ Server fetch failed: {srv_resp}")
             return None
@@ -276,10 +275,10 @@ def upload_to_videhide(final_video_path):
         print(f"☁️ Uploading Video as Original Name: {upload_filename}...")
         
         with open(final_video_path, 'rb') as f:
-            data = {'key': VIDEHIDE_API_KEY, 'fld_id': folder_id} if folder_id else {'key': VIDEHIDE_API_KEY}
+            data = {'key': STREAMHG_API_KEY, 'fld_id': folder_id} if folder_id else {'key': STREAMHG_API_KEY}
             up_resp = requests.post(upload_url, data=data, files={'file': (upload_filename, f)}, timeout=600).json()
         
-        print(f"📥 VideHide Response: {up_resp}")
+        print(f"📥 StreamHG Response: {up_resp}")
         if up_resp.get("status") == 200:
             files_list = up_resp.get("files", [])
             if files_list and isinstance(files_list, list):
@@ -297,14 +296,14 @@ def upload_to_videhide(final_video_path):
     return None
 
 # --- 4. UPDATE DATABASE ---
-def update_database(vhd_code):
+def update_database(file_code):
     print("💾 Updating Firestore...")
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
     fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set({
         'status': 'uploaded',
         'links': {
-            'vhd_video_id': vhd_code,
-            'vhd_stream': f"https://s1.xvs.tt/hls/{vhd_code}/master.m3u8"
+            'streamhg_video_id': file_code,
+            'streamhg_embed': f"https://streamhg.com/e/{file_code}"
         },
         'last_updated': firestore.SERVER_TIMESTAMP
     }, merge=True)
@@ -314,10 +313,10 @@ original_video = download_video()
 
 if original_video:
     final_video = process_subtitles_and_mux(original_video)
-    vhd_filecode = upload_to_videhide(final_video)
+    file_code = upload_to_streamhg(final_video)
     
-    if vhd_filecode:
-        update_database(vhd_filecode)
+    if file_code:
+        update_database(file_code)
         notify_success()
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
         if os.path.exists(TEMP_SUB_DIR): shutil.rmtree(TEMP_SUB_DIR)
