@@ -228,16 +228,14 @@ def is_error_text(t):
     return False
 
 def translate_single_line_guaranteed(text):
-    """දෝෂයක් ආවොත් සිංහලට හැරෙන තුරුම නැවත නැවත උත්සාහ කරන function එක"""
     translator = GoogleTranslator(source='auto', target='si')
-    for attempt in range(6):
+    for attempt in range(5):
         try:
             res = translator.translate(text)
             if res and not is_error_text(res):
                 return apply_spoken_sinhala(res)
-        except:
-            pass
-        time.sleep(1.5 + attempt)
+        except: pass
+        time.sleep(1 + attempt)
     return text
 
 def process_subtitles_and_mux(video_path):
@@ -264,8 +262,6 @@ def process_subtitles_and_mux(video_path):
         translator = GoogleTranslator(source='auto', target='si')
         batch_res = {}
         failed_lines = []
-        
-        # Batch උත්සාහය
         try:
             res = translator.translate_batch(batch_chunk)
             for orig, trans in zip(batch_chunk, res):
@@ -276,7 +272,6 @@ def process_subtitles_and_mux(video_path):
         except:
             failed_lines = list(batch_chunk)
             
-        # Error 500 ආපු හෝ Fail වුණු lines තනි තනිව සිංහලට පරිවර්තනය කර ගැනීම
         for f_line in failed_lines:
             batch_res[f_line] = translate_single_line_guaranteed(f_line)
             
@@ -303,8 +298,8 @@ def process_subtitles_and_mux(video_path):
     subs.save(sin_sub, encoding="utf-8")
     print("✅ Sinhala Translation 100% Completed!")
 
-    original_filename = os.path.basename(video_path)
-    base_name, _ = os.path.splitext(original_filename)
+    orig_filename = os.path.basename(video_path)
+    base_name, _ = os.path.splitext(orig_filename)
     output_filename = f"{base_name}.mkv"
     muxed_video_path = os.path.join(OUTPUT_DIR, output_filename)
 
@@ -338,19 +333,15 @@ def upload_to_streamhg(final_video_path):
         
         upload_url = srv_resp["result"]
         upload_filename = os.path.basename(final_video_path)
-        print(f"☁️ Uploading Video: {upload_filename}...")
+        print(f"☁️ Uploading Video to StreamHG: {upload_filename}...")
         
-        mime_type, _ = mimetypes.guess_type(final_video_path)
-        if not mime_type:
-            mime_type = 'video/x-matroska' if final_video_path.endswith('.mkv') else 'video/mp4'
-
         with open(final_video_path, 'rb') as f:
             data = {'key': STREAMHG_API_KEY}
-            if folder_id:
-                data['fld_id'] = folder_id
+            if folder_id and str(folder_id).isdigit() and int(folder_id) > 0:
+                data['fld_id'] = int(folder_id)
                 
             files = {
-                'file': (upload_filename, f, mime_type)
+                'file': (upload_filename, f)
             }
             up_resp = requests.post(upload_url, data=data, files=files, timeout=600).json()
         
