@@ -15,6 +15,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
 from deep_translator import GoogleTranslator
+from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
 try:
@@ -60,7 +61,7 @@ anime_title = payload.get("title", "Unknown Anime")
 print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Job: {job_type}")
 
 BASE_DIR = "downloads"
-TEMP_SUB_DIR = "temp_subs"
+TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
 OUTPUT_DIR = "output_muxed"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
@@ -139,6 +140,14 @@ def download_video():
     else:
         subprocess.run(['aria2c', '--seed-time=0', f'--dir={BASE_DIR}', magnet])
 
+    target_ep_int = int(ep_num)
+    for root, dirs, files in os.walk(BASE_DIR):
+        for f in files:
+            if f.endswith(('.mkv', '.mp4')):
+                f_ep = extract_ep_number(f)
+                if f_ep == target_ep_int:
+                    return os.path.join(root, f)
+                
     for root, dirs, files in os.walk(BASE_DIR):
         for f in files:
             if f.endswith(('.mkv', '.mp4')):
@@ -179,13 +188,6 @@ def search_subdl_for_episode(title, target_ep):
                             break
                 if not best_sub_url: best_sub_url = sub.get('url')
                 break
-            elif sub.get('full_season') or (sub.get('episode_from') and sub.get('episode_end') and sub['episode_from'] <= target_ep_int <= sub['episode_end']):
-                if sub.get('unpack_files'):
-                    for u_file in sub['unpack_files']:
-                        if u_file.get('episode') == target_ep_int:
-                            best_sub_url = u_file.get('url')
-                            break
-                if best_sub_url: break
 
         if best_sub_url:
             dl_url = "https://dl.subdl.com" + best_sub_url
@@ -240,16 +242,16 @@ def translate_single_line_guaranteed(text):
 
 def process_subtitles_and_mux(video_path):
     print("📝 Checking for Subtitles...")
-    eng_sub = "english.ass" 
+    eng_sub = os.path.join(TEMP_SUB_DIR, "english.ass") 
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
     valid_eng_sub = eng_sub if is_valid_subtitle(eng_sub) else search_subdl_for_episode(anime_title, ep_num)
     
     if not valid_eng_sub:
-        print("❌ Could not find a valid subtitle. Uploading original video without Sinhala subs.")
+        print("❌ Could not find a valid subtitle. Uploading original video.")
         return video_path
 
-    print("⚡ Translating Subtitles to Sinhala with Spoken Sinhala Dictionary...")
+    print("⚡ Translating Subtitles to Sinhala with Spoken Sinhala...")
     try: 
         subs = pysubs2.load(valid_eng_sub)
     except: 
@@ -294,12 +296,12 @@ def process_subtitles_and_mux(video_path):
         else:
             e.text = clean_text
     
-    sin_sub = "sinhala.srt"
+    sin_sub = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
     subs.save(sin_sub, encoding="utf-8")
-    print("✅ Sinhala Translation 100% Completed!")
+    print("✅ Sinhala Translation Complete!")
 
     orig_filename = os.path.basename(video_path)
-    base_name, _ = os.path.splitext(orig_filename)
+    base_name, ext = os.path.splitext(orig_filename)
     output_filename = f"{base_name}.mkv"
     muxed_video_path = os.path.join(OUTPUT_DIR, output_filename)
 
@@ -317,12 +319,12 @@ def process_subtitles_and_mux(video_path):
     
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    if os.path.exists(muxed_video_path):
+    if os.path.exists(muxed_video_path) and os.path.getsize(muxed_video_path) > 1000000:
         print(f"✅ Subtitle Muxing Complete! Output: {output_filename}")
         return muxed_video_path
     return video_path
 
-# --- 3. UPLOAD TO STREAMHG ---
+# --- 3. UPLOAD TO STREAMHG (Multipart Streaming) ---
 def upload_to_streamhg(final_video_path):
     print("☁️ Getting Upload Server...")
     try:
@@ -333,17 +335,21 @@ def upload_to_streamhg(final_video_path):
         
         upload_url = srv_resp["result"]
         upload_filename = os.path.basename(final_video_path)
-        print(f"☁️ Uploading Video to StreamHG: {upload_filename}...")
+        print(f"☁️ Uploading Streaming Payload: {upload_filename}...")
         
-        with open(final_video_path, 'rb') as f:
-            data = {'key': STREAMHG_API_KEY}
-            if folder_id and str(folder_id).isdigit() and int(folder_id) > 0:
-                data['fld_id'] = int(folder_id)
-                
-            files = {
-                'file': (upload_filename, f)
-            }
-            up_resp = requests.post(upload_url, data=data, files=files, timeout=600).json()
+        mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
+
+        fields = {
+            'key': STREAMHG_API_KEY,
+            'file': (upload_filename, open(final_video_path, 'rb'), mime_type)
+        }
+        if folder_id and str(folder_id).isdigit() and int(folder_id) > 0:
+            fields['fld_id'] = str(folder_id)
+
+        multipart_data = MultipartEncoder(fields=fields)
+        headers = {'Content-Type': multipart_data.content_type}
+        
+        up_resp = requests.post(upload_url, data=multipart_data, headers=headers, timeout=1200).json()
         
         print(f"📥 StreamHG Response: {up_resp}")
         if up_resp.get("status") == 200:
