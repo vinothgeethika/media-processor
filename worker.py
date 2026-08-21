@@ -193,13 +193,13 @@ def process_subtitles_and_mux(video_path):
     subs.save(sin_sub)
     print("✅ Translation Complete!")
 
-    # MUXING (Soft-coding)
-    print("🎬 Muxing Sinhala subtitle into the video (Fast Soft-sub)...")
+    # MUXING: Preserve original tracks + Add Sinhala sub as primary
+    print("🎬 Muxing: Preserving original tracks & adding Sinhala sub...")
     muxed_video = "muxed_video.mkv"
     
     cmd = [
         'ffmpeg', '-i', video_path, '-i', sin_sub,
-        '-map', '0:v:0', '-map', '0:a:0', '-map', '1:s:0',
+        '-map', '0:v', '-map', '0:a', '-map', '0:s?', '-map', '1:s',
         '-c', 'copy', '-c:s', 'srt',
         '-metadata:s:s:0', 'language=sin',
         '-metadata:s:s:0', 'title=Sinhala',
@@ -209,7 +209,7 @@ def process_subtitles_and_mux(video_path):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     if os.path.exists(muxed_video):
-        print("✅ Subtitle Muxing Complete!")
+        print("✅ Subtitle Muxing Complete (Original Subs + Sinhala Track Added)!")
         return muxed_video
     else:
         print("⚠️ Muxing failed. Uploading original video.")
@@ -222,7 +222,7 @@ def upload_to_videhide(final_video_path):
         srv_resp = requests.get(f"{VIDEHIDE_BASE_URL}/upload/server?key={VIDEHIDE_API_KEY}", timeout=15).json()
         if srv_resp.get("status") != 200: return None
         
-        print(f"☁️ Uploading Muxed Video: {os.path.basename(final_video_path)}...")
+        print(f"☁️ Uploading Video: {os.path.basename(final_video_path)}...")
         with open(final_video_path, 'rb') as f:
             data = {'key': VIDEHIDE_API_KEY, 'fld_id': folder_id} if folder_id else {'key': VIDEHIDE_API_KEY}
             up_resp = requests.post(srv_resp["result"], data=data, files={'file': (os.path.basename(final_video_path), f)}, timeout=300).json()
@@ -256,10 +256,7 @@ def update_database(vhd_code):
 original_video = download_video()
 
 if original_video:
-    # 1. සබ් එක අරන් ට්‍රාන්ස්ලේට් කරලා වීඩියෝ එක ඇතුළටම ඔබනවා (Mux කරනවා)
     final_muxed_video = process_subtitles_and_mux(original_video)
-    
-    # 2. අර API අවුල මඟහැරලා, මුළු වීඩියෝ එකම එකපාර අප්ලෝඩ් කරනවා.
     vhd_filecode = upload_to_videhide(final_muxed_video)
     
     if vhd_filecode:
