@@ -1,0 +1,36 @@
+name: Cloud Uploader Worker
+
+on:
+  repository_dispatch:
+    types: [start_upload_job]
+
+jobs:
+  process_video:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies (Aria2 & FFmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 ffmpeg
+
+      - name: Install Python Packages
+        run: |
+          pip install requests firebase-admin beautifulsoup4 pysubs2 deep-translator torrentool requests-toolbelt
+
+      - name: Create Firebase Key
+        run: echo '${{ secrets.FIREBASE_JSON }}' > serviceAccountKey.json
+
+      - name: Run Worker Script
+        env:
+          VIDEHIDE_API_KEY: ${{ secrets.VIDEHIDE_API_KEY }}
+          SUBDL_API_KEY: ${{ secrets.SUBDL_API_KEY }}
+          JOB_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: python worker.py
