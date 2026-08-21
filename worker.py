@@ -45,7 +45,6 @@ os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 def extract_ep_number(filename):
     clean = re.sub(r'\[.*?\]|\(.*?\)', ' ', filename.lower())
     clean = re.sub(r'\b(1080p|720p|480p|x264|x265|hevc|10bit|8bit)\b', ' ', clean)
-    
     m = re.search(r'[sS]\d+[eE]0*(\d+)', clean)
     if m: return int(m.group(1))
     m = re.search(r'\b(?:ep|episode)\.?\s?0*(\d+)\b', clean)
@@ -67,30 +66,21 @@ def download_video():
         
         if torrent_files:
             torrent_file = torrent_files[0]
-            print(f"✅ Metadata saved as: {torrent_file}")
-            
             from torrentool.api import Torrent
             my_torrent = Torrent.from_file(torrent_file)
             target_idx = None
-            
             for idx, f in enumerate(my_torrent.files, start=1):
                 if any(f.name.lower().endswith(ext) for ext in ['.mkv', '.mp4']):
-                    found_ep = extract_ep_number(os.path.basename(f.name))
-                    if found_ep == int(ep_num):
+                    if extract_ep_number(os.path.basename(f.name)) == int(ep_num):
                         target_idx = idx
                         break
-            
             if target_idx:
-                print(f"⏳ Downloading specific episode (Index {target_idx}) from batch...")
                 subprocess.run(['aria2c', '--seed-time=0', f'--select-file={target_idx}', f'--dir={BASE_DIR}', torrent_file])
             else:
-                print("❌ Episode not found inside the batch torrent!")
                 return None
         else:
-            print("❌ Failed to download torrent metadata!")
             return None
     else:
-        print("🎬 Processing Single Episode Magnet...")
         subprocess.run(['aria2c', '--seed-time=0', f'--dir={BASE_DIR}', magnet])
 
     for root, dirs, files in os.walk(BASE_DIR):
@@ -105,123 +95,78 @@ def is_valid_subtitle(file_path):
         return False
     try:
         subs = pysubs2.load(file_path)
-        if len(subs) < 25: # පේළි ගාණ 25ට අඩු නම් (උදා: සින්දු කෑලි විතරක් නම්) ප්‍රතික්ෂේප කරයි
-            return False
-        return True
+        return len(subs) >= 25
     except:
         return False
 
 def clean_pure_title(title):
-    # 'Season X', 'Part Y', 'Ep Z' වැනි සියලු දේ ඉවත් කර නියම නම පමණක් ලබා ගනී
     t = re.sub(r'(?i)(season|part|cour|ep|episode|s\d+|e\d+).*', '', title)
     return re.sub(r'\s+', ' ', t).strip()
 
 def search_subdl_for_episode(title, target_ep):
-    if not SUBDL_API_KEY:
-        print("⚠️ SubDL API Key is not set!")
-        return None
-        
+    if not SUBDL_API_KEY: return None
     pure_title = clean_pure_title(title)
-    print(f"🔍 Searching SubDL API for: '{pure_title}' Ep {target_ep}...")
-    
-    # Docs වලට අනුව හරියටම නම පමණක් (film_name) සහ unpack=1 භාවිතා කිරීම[cite: 6]
     api_url = f"https://api.subdl.com/api/v1/subtitles?api_key={SUBDL_API_KEY}&film_name={urllib.parse.quote(pure_title)}&type=tv&languages=EN&unpack=1"
     
     try:
         resp = requests.get(api_url, timeout=20).json()
-        if not resp.get('status') or not resp.get('subtitles'):
-            print("❌ SubDL: No subtitles found for this title.")
-            return None
-            
-        subtitles = resp.get('subtitles', [])
+        if not resp.get('status') or not resp.get('subtitles'): return None
         target_ep_int = int(target_ep)
         best_sub_url = None
         
-        # අදාළ Episode එකට ගැළපෙන සබ් එක තෝරා ගැනීම[cite: 6]
-        for sub in subtitles:
-            # කෙලින්ම Episode Number එක සමාන නම්
+        for sub in resp.get('subtitles', []):
             if sub.get('episode') == target_ep_int:
                 if sub.get('unpack_files'):
                     for u_file in sub['unpack_files']:
                         if u_file.get('episode') == target_ep_int:
                             best_sub_url = u_file.get('url')
                             break
-                if not best_sub_url:
-                    best_sub_url = sub.get('url')
+                if not best_sub_url: best_sub_url = sub.get('url')
                 break
-                
-            # Season Pack එකක් නම් සහ අපේ Episode එක ඒ සීමාවේ තියෙනවා නම්
             elif sub.get('full_season') or (sub.get('episode_from') and sub.get('episode_end') and sub['episode_from'] <= target_ep_int <= sub['episode_end']):
                 if sub.get('unpack_files'):
                     for u_file in sub['unpack_files']:
                         if u_file.get('episode') == target_ep_int:
                             best_sub_url = u_file.get('url')
                             break
-                if best_sub_url:
-                    break
+                if best_sub_url: break
 
         if best_sub_url:
             dl_url = "https://dl.subdl.com" + best_sub_url
-            print(f"📥 Downloading SubDL subtitle from: {dl_url}")
             sub_data = requests.get(dl_url, timeout=30).content
-            
-            # Zip එකක්ද, සාමාන්‍ය .srt එකක්ද කියා පරීක්ෂා කිරීම
             if sub_data[:4] == b'PK\x03\x04': 
                 zip_path = os.path.join(TEMP_SUB_DIR, "subdl.zip")
-                with open(zip_path, 'wb') as f:
-                    f.write(sub_data)
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(TEMP_SUB_DIR)
-                
+                with open(zip_path, 'wb') as f: f.write(sub_data)
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref: zip_ref.extractall(TEMP_SUB_DIR)
                 for root, dirs, files in os.walk(TEMP_SUB_DIR):
                     for f in files:
                         if f.endswith(('.srt', '.vtt', '.ass')):
                             sub_path = os.path.join(root, f)
-                            if is_valid_subtitle(sub_path):
-                                return sub_path
+                            if is_valid_subtitle(sub_path): return sub_path
             else:
                 sub_path = os.path.join(TEMP_SUB_DIR, "subdl_extracted.srt")
-                with open(sub_path, 'wb') as f:
-                    f.write(sub_data)
-                if is_valid_subtitle(sub_path):
-                    return sub_path
-                    
-        print("❌ SubDL: Episode not found in the results.")
-    except Exception as e:
-        print(f"⚠️ SubDL Error: {e}")
-        
+                with open(sub_path, 'wb') as f: f.write(sub_data)
+                if is_valid_subtitle(sub_path): return sub_path
+    except: pass
     return None
 
 def clean_tags(text):
     return re.sub(r'\{.*?\}|<[^>]+>', '', text).strip()
 
-def process_subtitles(video_path):
-    print("📝 Extracting Subtitles from Video...")
-    eng_sub = "english.ass" # FFmpeg සමහරවිට ass ලෙස දෙන බැවින් මෙලෙස සේව් කිරීම ආරක්ෂිතයි
-    
-    # Video එකෙන් සබ් එක ගැනීම (Errors ආවොත් Crash නොවී ඉස්සරහට යයි)
+def process_subtitles_and_mux(video_path):
+    print("📝 Extracting/Downloading Subtitles...")
+    eng_sub = "english.ass" 
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
-    valid_eng_sub = None
+    valid_eng_sub = eng_sub if is_valid_subtitle(eng_sub) else search_subdl_for_episode(anime_title, ep_num)
     
-    if is_valid_subtitle(eng_sub):
-        print("✅ Embedded Subtitle is VALID.")
-        valid_eng_sub = eng_sub
-    else:
-        print("⚠️ Embedded Subtitle is MISSING or BROKEN. Falling back to SubDL...")
-        subdl_file = search_subdl_for_episode(anime_title, ep_num)
-        if subdl_file:
-            valid_eng_sub = subdl_file
-        else:
-            print("❌ Could not find a valid subtitle anywhere!")
-            return None
+    if not valid_eng_sub:
+        print("❌ Could not find a valid subtitle. Uploading original video without Sinhala subs.")
+        return video_path
 
     print("⚡ Fast Translating Subtitles...")
-    try:
-        subs = pysubs2.load(valid_eng_sub)
-    except:
-        print("❌ Failed to parse subtitle file!")
-        return None
+    try: subs = pysubs2.load(valid_eng_sub)
+    except: return video_path
 
     unique_texts = list(set([clean_tags(e.text) for e in subs if clean_tags(e.text)]))
     translation_map = {}
@@ -232,61 +177,70 @@ def process_subtitles(video_path):
             try:
                 translated = translator.translate_batch(chunk)
                 return {orig: trans for orig, trans in zip(chunk, translated)}
-            except:
-                time.sleep(1)
+            except: time.sleep(1)
         return {orig: orig for orig in chunk}
 
     chunks = [unique_texts[i:i+40] for i in range(0, len(unique_texts), 40)]
-    
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-        futures = [executor.submit(translate_chunk, chunk) for chunk in chunks]
-        for future in concurrent.futures.as_completed(futures):
+        for future in concurrent.futures.as_completed([executor.submit(translate_chunk, chunk) for chunk in chunks]):
             translation_map.update(future.result())
 
     for e in subs:
         clean_text = clean_tags(e.text)
         e.text = translation_map.get(clean_text, e.text)
     
-    sin_sub = "sinhala.vtt"
+    sin_sub = "sinhala.srt"
     subs.save(sin_sub)
     print("✅ Translation Complete!")
-    return sin_sub
+
+    # MUXING (Soft-coding)
+    print("🎬 Muxing Sinhala subtitle into the video (Fast Soft-sub)...")
+    muxed_video = "muxed_video.mkv"
+    
+    cmd = [
+        'ffmpeg', '-i', video_path, '-i', sin_sub,
+        '-map', '0:v:0', '-map', '0:a:0', '-map', '1:s:0',
+        '-c', 'copy', '-c:s', 'srt',
+        '-metadata:s:s:0', 'language=sin',
+        '-metadata:s:s:0', 'title=Sinhala',
+        muxed_video, '-y'
+    ]
+    
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    if os.path.exists(muxed_video):
+        print("✅ Subtitle Muxing Complete!")
+        return muxed_video
+    else:
+        print("⚠️ Muxing failed. Uploading original video.")
+        return video_path
 
 # --- 3. UPLOAD TO VIDEHIDE ---
-def upload_to_videhide(video_path, sub_path):
+def upload_to_videhide(final_video_path):
     print("☁️ Getting Upload Server...")
-    srv_resp = requests.get(f"{VIDEHIDE_BASE_URL}/upload/server?key={VIDEHIDE_API_KEY}").json()
-    if srv_resp.get("status") != 200:
-        return None
-    upload_url = srv_resp["result"]
-
-    print("☁️ Uploading Video...")
-    with open(video_path, 'rb') as f:
-        data = {'key': VIDEHIDE_API_KEY, 'fld_id': folder_id} if folder_id else {'key': VIDEHIDE_API_KEY}
-        files = {'file': (os.path.basename(video_path), f)}
-        up_resp = requests.post(upload_url, data=data, files=files).json()
-    
-    if up_resp.get("status") != 200 or not up_resp.get("files"):
-        return None
-    
-    vhd_code = up_resp["files"][0]["filecode"]
-    print(f"✅ Video Uploaded! FileCode: {vhd_code}")
-
-    if sub_path:
-        print("☁️ Uploading Subtitle...")
-        with open(sub_path, 'rb') as sf:
-            sub_data = {'key': VIDEHIDE_API_KEY, 'file_code': vhd_code, 'sub_lang': 'sin'}
-            requests.post(f"{VIDEHIDE_BASE_URL}/upload/sub", data=sub_data, files={'sub_file': ('1.vtt', sf)})
-
-    return vhd_code
+    try:
+        srv_resp = requests.get(f"{VIDEHIDE_BASE_URL}/upload/server?key={VIDEHIDE_API_KEY}", timeout=15).json()
+        if srv_resp.get("status") != 200: return None
+        
+        print(f"☁️ Uploading Muxed Video: {os.path.basename(final_video_path)}...")
+        with open(final_video_path, 'rb') as f:
+            data = {'key': VIDEHIDE_API_KEY, 'fld_id': folder_id} if folder_id else {'key': VIDEHIDE_API_KEY}
+            up_resp = requests.post(srv_resp["result"], data=data, files={'file': (os.path.basename(final_video_path), f)}, timeout=300).json()
+        
+        if up_resp.get("status") == 200 and up_resp.get("files"):
+            vhd_code = up_resp["files"][0]["filecode"]
+            print(f"✅ Video Uploaded Successfully! FileCode: {vhd_code}")
+            return vhd_code
+            
+    except Exception as e:
+        print(f"⚠️ Upload Error: {e}")
+    return None
 
 # --- 4. UPDATE DATABASE ---
 def update_database(vhd_code):
     print("💾 Updating Firestore...")
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
-    doc_ref = db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id)
-    
-    doc_ref.set({
+    db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set({
         'status': 'uploaded',
         'links': {
             'vhd_video_id': vhd_code,
@@ -296,23 +250,22 @@ def update_database(vhd_code):
     }, merge=True)
 
     if job_type in ["custom_job", "server_3_manual"] and job_key:
-        print("💾 Updating RTDB sever_3_job status...")
-        rtdb_ref = firebase_admin.db.reference(f"sever_3_job/{job_key}")
-        rtdb_ref.update({"status": "completed"})
+        firebase_admin.db.reference(f"sever_3_job/{job_key}").update({"status": "completed"})
 
 # --- MAIN EXECUTION ---
-video_file = download_video()
+original_video = download_video()
 
-if video_file:
-    subtitle_file = process_subtitles(video_file)
-    vhd_filecode = upload_to_videhide(video_file, subtitle_file)
+if original_video:
+    # 1. සබ් එක අරන් ට්‍රාන්ස්ලේට් කරලා වීඩියෝ එක ඇතුළටම ඔබනවා (Mux කරනවා)
+    final_muxed_video = process_subtitles_and_mux(original_video)
+    
+    # 2. අර API අවුල මඟහැරලා, මුළු වීඩියෝ එකම එකපාර අප්ලෝඩ් කරනවා.
+    vhd_filecode = upload_to_videhide(final_muxed_video)
     
     if vhd_filecode:
         update_database(vhd_filecode)
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
-        
-        if os.path.exists(TEMP_SUB_DIR):
-            shutil.rmtree(TEMP_SUB_DIR)
+        if os.path.exists(TEMP_SUB_DIR): shutil.rmtree(TEMP_SUB_DIR)
         sys.exit(0)
     else:
         print("❌ Upload Failed!")
