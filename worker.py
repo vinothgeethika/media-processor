@@ -189,12 +189,13 @@ def search_subdl_for_episode(title, target_ep):
     return None
 
 def clean_tags(text):
-    return re.sub(r'\{.*?\}|<[^>]+>', '', text).strip()
+    if not text:
+        return ""
+    return re.sub(r'\{.*?\}|<[^>]+>', '', str(text)).strip()
 
 def process_subtitles_and_mux(video_path):
     print("📝 Checking for Subtitles...")
     eng_sub = "english.ass" 
-    # Extract existing sub for translation (if available)
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
     valid_eng_sub = eng_sub if is_valid_subtitle(eng_sub) else search_subdl_for_episode(anime_title, ep_num)
@@ -209,7 +210,7 @@ def process_subtitles_and_mux(video_path):
     except: 
         return video_path
 
-    unique_texts = list(set([clean_tags(e.text) for e in subs if clean_tags(e.text)]))
+    unique_texts = list(set([clean_tags(e.text) for e in subs if e.text and clean_tags(e.text)]))
     translation_map = {}
     
     def translate_chunk(chunk):
@@ -217,8 +218,9 @@ def process_subtitles_and_mux(video_path):
         for _ in range(3):
             try:
                 translated = translator.translate_batch(chunk)
-                return {orig: trans for orig, trans in zip(chunk, translated)}
-            except: time.sleep(1)
+                return {orig: (trans if trans else orig) for orig, trans in zip(chunk, translated)}
+            except: 
+                time.sleep(1)
         return {orig: orig for orig in chunk}
 
     chunks = [unique_texts[i:i+40] for i in range(0, len(unique_texts), 40)]
@@ -227,14 +229,17 @@ def process_subtitles_and_mux(video_path):
             translation_map.update(future.result())
 
     for e in subs:
-        clean_text = clean_tags(e.text)
-        e.text = translation_map.get(clean_text, e.text)
+        raw_text = str(e.text) if e.text is not None else ""
+        clean_text = clean_tags(raw_text)
+        if clean_text in translation_map:
+            e.text = str(translation_map[clean_text])
+        else:
+            e.text = raw_text
     
     sin_sub = "sinhala.srt"
     subs.save(sin_sub)
     print("✅ Sinhala Translation Complete!")
 
-    # Original Filename එක ආරක්ෂා කරගනිමින් output path එක සැකසීම
     original_filename = os.path.basename(video_path)
     base_name, _ = os.path.splitext(original_filename)
     output_filename = f"{base_name}.mkv"
@@ -242,7 +247,6 @@ def process_subtitles_and_mux(video_path):
 
     print(f"🎬 Muxing: Removing all original subtitles & adding ONLY Sinhala track [{output_filename}]...")
 
-    # මෙහි -map 0:v සහ -map 0:a පමණක් යොදා පරණ සියලුම subs ඉවත් කර, අලුත් සිංහල sub එක පමණක් (-map 1:s:0) අමුණා ඇත.
     cmd = [
         'ffmpeg', '-i', video_path, '-i', sin_sub,
         '-map', '0:v', '-map', '0:a', '-map', '1:s:0',
