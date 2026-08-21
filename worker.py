@@ -11,16 +11,20 @@ import shutil
 import urllib.parse
 import concurrent.futures
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, db
 import pysubs2
 from deep_translator import GoogleTranslator
 
-# --- SETUP FIREBASE ---
+# --- ⚙️ SETUP FIREBASE ---
 cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://your-rtdb-default.firebaseio.com")
 
-# --- ENVIRONMENT VARIABLES ---
+firebase_admin.initialize_app(cred, {
+    'databaseURL': FIREBASE_DB_URL
+})
+fs_db = firestore.client()
+
+# --- ⚙️ ENVIRONMENT VARIABLES & PAYLOAD ---
 VIDEHIDE_API_KEY = os.environ.get("VIDEHIDE_API_KEY")
 VIDEHIDE_BASE_URL = "https://earnvidsapi.com/api"
 SUBDL_API_KEY = os.environ.get("SUBDL_API_KEY", "") 
@@ -42,6 +46,33 @@ TEMP_SUB_DIR = "temp_subs"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 
+def notify_failure(reason="failed"):
+    try:
+        db.reference("worker_job_status").set({
+            "status": "failed",
+            "anilist_id": str(anime_id),
+            "episode": ep_num,
+            "reason": reason,
+            "timestamp": time.time()
+        })
+        if job_key:
+            db.reference(f"sever_3_job/{job_key}").update({"status": "worker_failed"})
+    except Exception as e:
+        print(f"⚠️ Failed to write RTDB feedback: {e}")
+
+def notify_success():
+    try:
+        db.reference("worker_job_status").set({
+            "status": "success",
+            "anilist_id": str(anime_id),
+            "episode": ep_num,
+            "timestamp": time.time()
+        })
+        if job_key:
+            db.reference(f"sever_3_job/{job_key}").update({"status": "completed"})
+    except Exception as e:
+        print(f"⚠️ Failed to write RTDB feedback: {e}")
+
 def extract_ep_number(filename):
     clean = re.sub(r'\[.*?\]|\(.*?\)', ' ', filename.lower())
     clean = re.sub(r'\b(1080p|720p|480p|x264|x265|hevc|10bit|8bit)\b', ' ', clean)
@@ -61,7 +92,8 @@ def download_video():
     if job_type == "backlog" and search_type == "BATCH":
         print("📦 Processing BATCH Magnet...")
         for old_t in glob.glob("*.torrent"):
-            os.remove(old_t)
+            try: os.remove(old_t)
+            except: pass
             
         subprocess.run(['aria2c', '--bt-metadata-only=true', '--bt-save-metadata=true', '--seed-time=0', '--bt-stop-timeout=120', magnet])
         torrent_files = glob.glob("*.torrent")
@@ -79,8 +111,10 @@ def download_video():
             if target_idx:
                 subprocess.run(['aria2c', '--seed-time=0', f'--select-file={target_idx}', f'--dir={BASE_DIR}', torrent_file])
             else:
+                print("❌ Episode not found inside batch!")
                 return None
         else:
+            print("❌ Failed to grab torrent metadata!")
             return None
     else:
         subprocess.run(['aria2c', '--seed-time=0', f'--dir={BASE_DIR}', magnet])
@@ -156,7 +190,7 @@ def clean_tags(text):
     return re.sub(r'\{.*?\}|<[^>]+>', '', text).strip()
 
 def process_subtitles_and_mux(video_path):
-    print("📝 Extracting Subtitles from Video...")
+    print("📝 Checking for Subtitles...")
     eng_sub = "english.ass" 
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
@@ -166,7 +200,7 @@ def process_subtitles_and_mux(video_path):
         print("❌ Could not find a valid subtitle. Uploading original video without Sinhala subs.")
         return video_path
 
-    print("⚡ Translating to Sinhala...")
+    print("⚡ Translating Subtitles to Sinhala...")
     try: 
         subs = pysubs2.load(valid_eng_sub)
     except: 
@@ -181,8 +215,7 @@ def process_subtitles_and_mux(video_path):
             try:
                 translated = translator.translate_batch(chunk)
                 return {orig: trans for orig, trans in zip(chunk, translated)}
-            except: 
-                time.sleep(1)
+            except: time.sleep(1)
         return {orig: orig for orig in chunk}
 
     chunks = [unique_texts[i:i+40] for i in range(0, len(unique_texts), 40)]
@@ -198,7 +231,7 @@ def process_subtitles_and_mux(video_path):
     subs.save(sin_sub)
     print("✅ Sinhala Translation Complete!")
 
-    print("🎬 Muxing Sinhala subtitle into the video...")
+    print("🎬 Muxing: Adding Sinhala track & keeping original subtitles...")
     probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', video_path]
     probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     existing_sub_count = len(probe_res.stdout.strip().splitlines()) if probe_res.stdout.strip() else 0
@@ -249,7 +282,6 @@ def upload_to_videhide(final_video_path):
                 if vhd_code:
                     print(f"✅ Video Uploaded Successfully! FileCode: {vhd_code}")
                     return vhd_code
-                    
     except Exception as e:
         print(f"⚠️ Upload Error: {e}")
     return None
@@ -258,7 +290,7 @@ def upload_to_videhide(final_video_path):
 def update_database(vhd_code):
     print("💾 Updating Firestore...")
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
-    db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set({
+    fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set({
         'status': 'uploaded',
         'links': {
             'vhd_video_id': vhd_code,
@@ -266,9 +298,6 @@ def update_database(vhd_code):
         },
         'last_updated': firestore.SERVER_TIMESTAMP
     }, merge=True)
-
-    if job_type in ["custom_job", "server_3_manual"] and job_key:
-        firebase_admin.db.reference(f"sever_3_job/{job_key}").update({"status": "completed"})
 
 # --- MAIN EXECUTION ---
 original_video = download_video()
@@ -279,14 +308,15 @@ if original_video:
     
     if vhd_filecode:
         update_database(vhd_filecode)
+        notify_success()
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
         if os.path.exists(TEMP_SUB_DIR): shutil.rmtree(TEMP_SUB_DIR)
         sys.exit(0)
     else:
         print("❌ Upload Failed!")
-        if job_key: firebase_admin.db.reference(f"sever_3_job/{job_key}").update({"status": "worker_failed"})
+        notify_failure("upload_failed")
         sys.exit(1)
 else:
     print("❌ Download Failed!")
-    if job_key: firebase_admin.db.reference(f"sever_3_job/{job_key}").update({"status": "worker_failed"})
+    notify_failure("download_failed")
     sys.exit(1)
