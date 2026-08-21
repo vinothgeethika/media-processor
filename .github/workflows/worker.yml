@@ -30,7 +30,7 @@ jobs:
 
       - name: Run Worker Script
         env:
-          VIDEHIDE_API_KEY: ${{ secrets.VIDEHIDE_API_KEY }}
+          STREAMHG_API_KEY: ${{ secrets.STREAMHG_API_KEY }}
           SUBDL_API_KEY: ${{ secrets.SUBDL_API_KEY }}
           JOB_PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: python worker.py
