@@ -16,6 +16,23 @@ from firebase_admin import credentials, firestore, db
 import pysubs2
 from deep_translator import GoogleTranslator
 
+# --- 🗣️ SPOKEN SINHALA DICTIONARY ---
+try:
+    from spoken_dict import SPOKEN_DICT
+except ImportError:
+    SPOKEN_DICT = {}
+
+def apply_spoken_sinhala(text):
+    if not text or not SPOKEN_DICT: 
+        return text
+    sorted_keys = sorted(SPOKEN_DICT.keys(), key=len, reverse=True)
+    result_text = str(text)
+    for key in sorted_keys:
+        value = SPOKEN_DICT[key]
+        pattern = r'(?<![\w\u0D80-\u0DFF])' + re.escape(key) + r'(?![\w\u0D80-\u0DFF])'
+        result_text = re.sub(pattern, value, result_text)
+    return result_text
+
 # --- ⚙️ SETUP FIREBASE ---
 cred = credentials.Certificate("serviceAccountKey.json")
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://your-rtdb-default.firebaseio.com")
@@ -189,10 +206,39 @@ def search_subdl_for_episode(title, target_ep):
     except: pass
     return None
 
-def clean_tags(text):
-    if not text:
-        return ""
-    return re.sub(r'\{.*?\}|<[^>]+>', '', str(text)).strip()
+def clean_vtt_tags(text):
+    if not text: return ""
+    t = str(text)
+    t = re.sub(r'\{.*?\}', '', t).replace('\\h', ' ').replace('\\N', '\n')
+    t = re.sub(r'<[^>]+>', '', t)
+    return t.strip()
+
+def is_garbage_sub(text):
+    if not text: return True
+    if re.search(r'\\pos\(|\\c&H|\\alpha|\\t\(|\\fad\(|\\an\d', str(text)): return True
+    cl = clean_vtt_tags(text)
+    if re.match(r'^m\s+-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+(?:l|b|s|c|m)\s+', cl): return True
+    return False
+
+def is_error_text(t):
+    if not t: return True
+    t_str = str(t)
+    if "Error 500" in t_str or "Server Error" in t_str or "<!DOCTYPE html>" in t_str or "That’s an error" in t_str:
+        return True
+    return False
+
+def translate_single_line_guaranteed(text):
+    """දෝෂයක් ආවොත් සිංහලට හැරෙන තුරුම නැවත නැවත උත්සාහ කරන function එක"""
+    translator = GoogleTranslator(source='auto', target='si')
+    for attempt in range(6):
+        try:
+            res = translator.translate(text)
+            if res and not is_error_text(res):
+                return apply_spoken_sinhala(res)
+        except:
+            pass
+        time.sleep(1.5 + attempt)
+    return text
 
 def process_subtitles_and_mux(video_path):
     print("📝 Checking for Subtitles...")
@@ -205,48 +251,64 @@ def process_subtitles_and_mux(video_path):
         print("❌ Could not find a valid subtitle. Uploading original video without Sinhala subs.")
         return video_path
 
-    print("⚡ Translating Subtitles to Sinhala...")
+    print("⚡ Translating Subtitles to Sinhala with Spoken Sinhala Dictionary...")
     try: 
         subs = pysubs2.load(valid_eng_sub)
     except: 
         return video_path
 
-    unique_texts = list(set([clean_tags(e.text) for e in subs if e.text and clean_tags(e.text)]))
+    unique_texts = list(set([clean_vtt_tags(e.text) for e in subs if e.text and not is_garbage_sub(e.text) and len(clean_vtt_tags(e.text)) >= 2]))
     translation_map = {}
     
-    def translate_chunk(chunk):
+    def safe_translate_batch(batch_chunk):
         translator = GoogleTranslator(source='auto', target='si')
-        for _ in range(3):
-            try:
-                translated = translator.translate_batch(chunk)
-                return {orig: (trans if trans else orig) for orig, trans in zip(chunk, translated)}
-            except: 
-                time.sleep(1)
-        return {orig: orig for orig in chunk}
+        batch_res = {}
+        failed_lines = []
+        
+        # Batch උත්සාහය
+        try:
+            res = translator.translate_batch(batch_chunk)
+            for orig, trans in zip(batch_chunk, res):
+                if is_error_text(trans):
+                    failed_lines.append(orig)
+                else:
+                    batch_res[orig] = apply_spoken_sinhala(trans)
+        except:
+            failed_lines = list(batch_chunk)
+            
+        # Error 500 ආපු හෝ Fail වුණු lines තනි තනිව සිංහලට පරිවර්තනය කර ගැනීම
+        for f_line in failed_lines:
+            batch_res[f_line] = translate_single_line_guaranteed(f_line)
+            
+        return batch_res
 
-    chunks = [unique_texts[i:i+40] for i in range(0, len(unique_texts), 40)]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-        for future in concurrent.futures.as_completed([executor.submit(translate_chunk, chunk) for chunk in chunks]):
+    chunks = [unique_texts[i:i+20] for i in range(0, len(unique_texts), 20)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(safe_translate_batch, chunk) for chunk in chunks]
+        for future in concurrent.futures.as_completed(futures):
             translation_map.update(future.result())
 
     for e in subs:
         raw_text = str(e.text) if e.text is not None else ""
-        clean_text = clean_tags(raw_text)
+        if is_garbage_sub(raw_text):
+            e.text = ""
+            continue
+        clean_text = clean_vtt_tags(raw_text)
         if clean_text in translation_map:
             e.text = str(translation_map[clean_text])
         else:
-            e.text = raw_text
+            e.text = clean_text
     
     sin_sub = "sinhala.srt"
-    subs.save(sin_sub)
-    print("✅ Sinhala Translation Complete!")
+    subs.save(sin_sub, encoding="utf-8")
+    print("✅ Sinhala Translation 100% Completed!")
 
     original_filename = os.path.basename(video_path)
     base_name, _ = os.path.splitext(original_filename)
     output_filename = f"{base_name}.mkv"
     muxed_video_path = os.path.join(OUTPUT_DIR, output_filename)
 
-    print(f"🎬 Muxing: Removing all original subtitles & adding ONLY Sinhala track [{output_filename}]...")
+    print(f"🎬 Muxing: Adding ONLY Sinhala track [{output_filename}]...")
 
     cmd = [
         'ffmpeg', '-i', video_path, '-i', sin_sub,
@@ -276,7 +338,7 @@ def upload_to_streamhg(final_video_path):
         
         upload_url = srv_resp["result"]
         upload_filename = os.path.basename(final_video_path)
-        print(f"☁️ Uploading Video as Original Name: {upload_filename}...")
+        print(f"☁️ Uploading Video: {upload_filename}...")
         
         mime_type, _ = mimetypes.guess_type(final_video_path)
         if not mime_type:
