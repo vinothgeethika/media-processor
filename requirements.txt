@@ -1,0 +1,7 @@
+requests
+firebase-admin
+beautifulsoup4
+pysubs2
+deep-translator
+requests-toolbelt
+torrentool
