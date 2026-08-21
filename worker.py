@@ -51,6 +51,8 @@ def extract_ep_number(filename):
     if m: return int(m.group(1))
     m = re.search(r'\s-\s0*(\d+)(?:v\d)?\b', clean)
     if m: return int(m.group(1))
+    m = re.search(r'\b0*(\d+)\b', clean)
+    if m: return int(m.group(1))
     return None
 
 # --- 1. DOWNLOADING VIDEO (Aria2c) ---
@@ -95,7 +97,7 @@ def is_valid_subtitle(file_path):
         return False
     try:
         subs = pysubs2.load(file_path)
-        return len(subs) >= 25
+        return len(subs) >= 20
     except:
         return False
 
@@ -196,15 +198,12 @@ def process_subtitles_and_mux(video_path):
     subs.save(sin_sub)
     print("✅ Sinhala Translation Complete!")
 
-    # Video එක තුළ පවතින Subtitle tracks ගණන පරීක්ෂා කිරීම
     print("🎬 Muxing Sinhala subtitle into the video...")
     probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', video_path]
     probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     existing_sub_count = len(probe_res.stdout.strip().splitlines()) if probe_res.stdout.strip() else 0
 
     muxed_video = "muxed_video.mkv"
-    
-    # Sinhala Subtitle Track එක අලුත්ම Track එක ලෙස (index = existing_sub_count) එක් කර Default ලෙස සැකසීම
     cmd = [
         'ffmpeg', '-i', video_path, '-i', sin_sub,
         '-map', '0:v', '-map', '0:a', '-map', '0:s?', '-map', '1:s:0',
@@ -220,27 +219,37 @@ def process_subtitles_and_mux(video_path):
     if os.path.exists(muxed_video):
         print("✅ Subtitle Muxing Complete!")
         return muxed_video
-    else:
-        print("⚠️ Muxing failed. Uploading original video.")
-        return video_path
+    return video_path
 
 # --- 3. UPLOAD TO VIDEHIDE ---
 def upload_to_videhide(final_video_path):
     print("☁️ Getting Upload Server...")
     try:
         srv_resp = requests.get(f"{VIDEHIDE_BASE_URL}/upload/server?key={VIDEHIDE_API_KEY}", timeout=15).json()
-        if srv_resp.get("status") != 200: return None
+        if srv_resp.get("status") != 200: 
+            print(f"❌ Server fetch failed: {srv_resp}")
+            return None
         
+        upload_url = srv_resp["result"]
         print(f"☁️ Uploading Video: {os.path.basename(final_video_path)}...")
         with open(final_video_path, 'rb') as f:
             data = {'key': VIDEHIDE_API_KEY, 'fld_id': folder_id} if folder_id else {'key': VIDEHIDE_API_KEY}
-            up_resp = requests.post(srv_resp["result"], data=data, files={'file': (os.path.basename(final_video_path), f)}, timeout=300).json()
+            up_resp = requests.post(upload_url, data=data, files={'file': (os.path.basename(final_video_path), f)}, timeout=600).json()
         
-        if up_resp.get("status") == 200 and up_resp.get("files"):
-            vhd_code = up_resp["files"][0]["filecode"]
-            print(f"✅ Video Uploaded Successfully! FileCode: {vhd_code}")
-            return vhd_code
-            
+        print(f"📥 VideHide Response: {up_resp}")
+        if up_resp.get("status") == 200:
+            files_list = up_resp.get("files", [])
+            if files_list and isinstance(files_list, list):
+                vhd_code = files_list[0].get("filecode")
+                if vhd_code:
+                    print(f"✅ Video Uploaded Successfully! FileCode: {vhd_code}")
+                    return vhd_code
+            elif "result" in up_resp and isinstance(up_resp["result"], dict):
+                vhd_code = up_resp["result"].get("filecode")
+                if vhd_code:
+                    print(f"✅ Video Uploaded Successfully! FileCode: {vhd_code}")
+                    return vhd_code
+                    
     except Exception as e:
         print(f"⚠️ Upload Error: {e}")
     return None
@@ -265,8 +274,8 @@ def update_database(vhd_code):
 original_video = download_video()
 
 if original_video:
-    final_muxed_video = process_subtitles_and_mux(original_video)
-    vhd_filecode = upload_to_videhide(final_muxed_video)
+    final_video = process_subtitles_and_mux(original_video)
+    vhd_filecode = upload_to_videhide(final_video)
     
     if vhd_filecode:
         update_database(vhd_filecode)
