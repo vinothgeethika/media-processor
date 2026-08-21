@@ -194,6 +194,7 @@ def clean_tags(text):
 def process_subtitles_and_mux(video_path):
     print("📝 Checking for Subtitles...")
     eng_sub = "english.ass" 
+    # Extract existing sub for translation (if available)
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
     valid_eng_sub = eng_sub if is_valid_subtitle(eng_sub) else search_subdl_for_episode(anime_title, ep_num)
@@ -239,18 +240,16 @@ def process_subtitles_and_mux(video_path):
     output_filename = f"{base_name}.mkv"
     muxed_video_path = os.path.join(OUTPUT_DIR, output_filename)
 
-    print(f"🎬 Muxing: Adding Sinhala track & keeping original filename [{output_filename}]...")
-    probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', video_path]
-    probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    existing_sub_count = len(probe_res.stdout.strip().splitlines()) if probe_res.stdout.strip() else 0
+    print(f"🎬 Muxing: Removing all original subtitles & adding ONLY Sinhala track [{output_filename}]...")
 
+    # මෙහි -map 0:v සහ -map 0:a පමණක් යොදා පරණ සියලුම subs ඉවත් කර, අලුත් සිංහල sub එක පමණක් (-map 1:s:0) අමුණා ඇත.
     cmd = [
         'ffmpeg', '-i', video_path, '-i', sin_sub,
-        '-map', '0:v', '-map', '0:a', '-map', '0:s?', '-map', '1:s:0',
+        '-map', '0:v', '-map', '0:a', '-map', '1:s:0',
         '-c', 'copy', '-c:s', 'srt',
-        f'-metadata:s:s:{existing_sub_count}', 'language=sin',
-        f'-metadata:s:s:{existing_sub_count}', 'title=Sinhala',
-        f'-disposition:s:{existing_sub_count}', 'default',
+        '-metadata:s:s:0', 'language=sin',
+        '-metadata:s:s:0', 'title=Sinhala',
+        '-disposition:s:s:0', 'default',
         muxed_video_path, '-y'
     ]
     
