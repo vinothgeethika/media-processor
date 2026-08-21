@@ -8,6 +8,7 @@ import glob
 import re
 import zipfile
 import shutil
+import urllib.parse
 import concurrent.futures
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -21,6 +22,7 @@ db = firestore.client()
 
 # --- ENVIRONMENT VARIABLES ---
 VIDEHIDE_API_KEY = os.environ.get("VIDEHIDE_API_KEY")
+VIDEHIDE_BASE_URL = "https://earnvidsapi.com/api"
 SUBDL_API_KEY = os.environ.get("SUBDL_API_KEY", "") 
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 
@@ -41,7 +43,6 @@ os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 
 def extract_ep_number(filename):
-    """File name එකෙන් Episode Number එක නිවැරදිව ලබාගැනීමේ ශක්තිමත් ක්‍රමය"""
     clean = re.sub(r'\[.*?\]|\(.*?\)', ' ', filename.lower())
     clean = re.sub(r'\b(1080p|720p|480p|x264|x265|hevc|10bit|8bit)\b', ' ', clean)
     
@@ -58,14 +59,10 @@ def download_video():
     print(f"📥 Starting Download...")
     if job_type == "backlog" and search_type == "BATCH":
         print("📦 Processing BATCH Magnet...")
-        
-        # කලින් තිබුණු .torrent ෆයිල් අයින් කිරීම
         for old_t in glob.glob("*.torrent"):
             os.remove(old_t)
             
         subprocess.run(['aria2c', '--bt-metadata-only=true', '--bt-save-metadata=true', '--seed-time=0', '--bt-stop-timeout=120', magnet])
-        
-        # aria2c එකෙන් හදපු .torrent ෆයිල් එක හොයාගැනීම (නම කුමක් වුවත්)
         torrent_files = glob.glob("*.torrent")
         
         if torrent_files:
@@ -81,11 +78,10 @@ def download_video():
                     found_ep = extract_ep_number(os.path.basename(f.name))
                     if found_ep == int(ep_num):
                         target_idx = idx
-                        print(f"🎯 Found Episode {ep_num} at index {target_idx}: {f.name}")
                         break
             
             if target_idx:
-                print("⏳ Downloading specific episode from batch...")
+                print(f"⏳ Downloading specific episode (Index {target_idx}) from batch...")
                 subprocess.run(['aria2c', '--seed-time=0', f'--select-file={target_idx}', f'--dir={BASE_DIR}', torrent_file])
             else:
                 print("❌ Episode not found inside the batch torrent!")
@@ -105,18 +101,19 @@ def download_video():
 
 # --- 2. SUBTITLE HANDLING & SUBDL API ---
 def is_valid_subtitle(file_path):
-    if not os.path.exists(file_path) or os.path.getsize(file_path) < 500:
+    if not os.path.exists(file_path) or os.path.getsize(file_path) < 100:
         return False
     try:
         subs = pysubs2.load(file_path)
-        if len(subs) < 50: 
+        if len(subs) < 25: # පේළි ගාණ 25ට අඩු නම් (උදා: සින්දු කෑලි විතරක් නම්) ප්‍රතික්ෂේප කරයි
             return False
         return True
     except:
         return False
 
-def clean_search_title(title):
-    t = re.sub(r'(?:\b|_)(?:s|season|series)\s?\d+(?:\b|_)', ' ', title, flags=re.IGNORECASE)
+def clean_pure_title(title):
+    # 'Season X', 'Part Y', 'Ep Z' වැනි සියලු දේ ඉවත් කර නියම නම පමණක් ලබා ගනී
+    t = re.sub(r'(?i)(season|part|cour|ep|episode|s\d+|e\d+).*', '', title)
     return re.sub(r'\s+', ' ', t).strip()
 
 def search_subdl_for_episode(title, target_ep):
@@ -124,49 +121,72 @@ def search_subdl_for_episode(title, target_ep):
         print("⚠️ SubDL API Key is not set!")
         return None
         
-    print(f"🔍 Searching SubDL for: {title} Ep {target_ep}...")
-    query = clean_search_title(title)
-    api_url = f"https://api.subdl.com/api/v1/subtitles?api_key={SUBDL_API_KEY}&query={query}&languages=EN"
+    pure_title = clean_pure_title(title)
+    print(f"🔍 Searching SubDL API for: '{pure_title}' Ep {target_ep}...")
+    
+    # Docs වලට අනුව හරියටම නම පමණක් (film_name) සහ unpack=1 භාවිතා කිරීම[cite: 6]
+    api_url = f"https://api.subdl.com/api/v1/subtitles?api_key={SUBDL_API_KEY}&film_name={urllib.parse.quote(pure_title)}&type=tv&languages=EN&unpack=1"
     
     try:
         resp = requests.get(api_url, timeout=20).json()
-        if not resp.get('status') or not resp.get('results'):
+        if not resp.get('status') or not resp.get('subtitles'):
+            print("❌ SubDL: No subtitles found for this title.")
             return None
             
-        best_result = resp['results'][0]
-        dl_url = "https://dl.subdl.com" + best_result['url']
-        zip_path = os.path.join(TEMP_SUB_DIR, "subdl.zip")
-        
-        print("📥 Downloading SubDL Archive...")
-        zip_data = requests.get(dl_url, timeout=30).content
-        with open(zip_path, 'wb') as f:
-            f.write(zip_data)
-            
-        print("📦 Extracting and Searching inside ZIP...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(TEMP_SUB_DIR)
-            
-        extracted_files = []
-        for root, dirs, files in os.walk(TEMP_SUB_DIR):
-            for f in files:
-                if f.endswith(('.srt', '.vtt', '.ass')):
-                    extracted_files.append(os.path.join(root, f))
-        
+        subtitles = resp.get('subtitles', [])
         target_ep_int = int(target_ep)
+        best_sub_url = None
         
-        for sub_file in extracted_files:
-            fname = os.path.basename(sub_file).lower()
-            match = re.search(r'[sS]\d+[eE]0*(\d+)', fname) or re.search(r'\b(?:ep|episode)\.?\s?0*(\d+)\b', fname) or re.search(r'\b0*(\d+)\b', fname)
+        # අදාළ Episode එකට ගැළපෙන සබ් එක තෝරා ගැනීම[cite: 6]
+        for sub in subtitles:
+            # කෙලින්ම Episode Number එක සමාන නම්
+            if sub.get('episode') == target_ep_int:
+                if sub.get('unpack_files'):
+                    for u_file in sub['unpack_files']:
+                        if u_file.get('episode') == target_ep_int:
+                            best_sub_url = u_file.get('url')
+                            break
+                if not best_sub_url:
+                    best_sub_url = sub.get('url')
+                break
+                
+            # Season Pack එකක් නම් සහ අපේ Episode එක ඒ සීමාවේ තියෙනවා නම්
+            elif sub.get('full_season') or (sub.get('episode_from') and sub.get('episode_end') and sub['episode_from'] <= target_ep_int <= sub['episode_end']):
+                if sub.get('unpack_files'):
+                    for u_file in sub['unpack_files']:
+                        if u_file.get('episode') == target_ep_int:
+                            best_sub_url = u_file.get('url')
+                            break
+                if best_sub_url:
+                    break
+
+        if best_sub_url:
+            dl_url = "https://dl.subdl.com" + best_sub_url
+            print(f"📥 Downloading SubDL subtitle from: {dl_url}")
+            sub_data = requests.get(dl_url, timeout=30).content
             
-            if match and int(match.group(1)) == target_ep_int:
-                print(f"🎯 Found Matching SubDL file: {fname}")
-                if is_valid_subtitle(sub_file):
-                    return sub_file
+            # Zip එකක්ද, සාමාන්‍ය .srt එකක්ද කියා පරීක්ෂා කිරීම
+            if sub_data[:4] == b'PK\x03\x04': 
+                zip_path = os.path.join(TEMP_SUB_DIR, "subdl.zip")
+                with open(zip_path, 'wb') as f:
+                    f.write(sub_data)
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(TEMP_SUB_DIR)
+                
+                for root, dirs, files in os.walk(TEMP_SUB_DIR):
+                    for f in files:
+                        if f.endswith(('.srt', '.vtt', '.ass')):
+                            sub_path = os.path.join(root, f)
+                            if is_valid_subtitle(sub_path):
+                                return sub_path
+            else:
+                sub_path = os.path.join(TEMP_SUB_DIR, "subdl_extracted.srt")
+                with open(sub_path, 'wb') as f:
+                    f.write(sub_data)
+                if is_valid_subtitle(sub_path):
+                    return sub_path
                     
-        if len(extracted_files) == 1 and is_valid_subtitle(extracted_files[0]):
-            print("🎯 Using the only valid subtitle found in the archive.")
-            return extracted_files[0]
-            
+        print("❌ SubDL: Episode not found in the results.")
     except Exception as e:
         print(f"⚠️ SubDL Error: {e}")
         
@@ -177,7 +197,9 @@ def clean_tags(text):
 
 def process_subtitles(video_path):
     print("📝 Extracting Subtitles from Video...")
-    eng_sub = "english.srt"
+    eng_sub = "english.ass" # FFmpeg සමහරවිට ass ලෙස දෙන බැවින් මෙලෙස සේව් කිරීම ආරක්ෂිතයි
+    
+    # Video එකෙන් සබ් එක ගැනීම (Errors ආවොත් Crash නොවී ඉස්සරහට යයි)
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
     valid_eng_sub = None
@@ -195,9 +217,13 @@ def process_subtitles(video_path):
             return None
 
     print("⚡ Fast Translating Subtitles...")
-    subs = pysubs2.load(valid_eng_sub)
+    try:
+        subs = pysubs2.load(valid_eng_sub)
+    except:
+        print("❌ Failed to parse subtitle file!")
+        return None
+
     unique_texts = list(set([clean_tags(e.text) for e in subs if clean_tags(e.text)]))
-    
     translation_map = {}
     
     def translate_chunk(chunk):
