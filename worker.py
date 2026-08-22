@@ -6,9 +6,7 @@ import requests
 import subprocess
 import glob
 import re
-import urllib.parse
 import concurrent.futures
-import mimetypes
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
@@ -58,10 +56,8 @@ print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
-OUTPUT_DIR = "output_muxed"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def notify_status(status="failed", file_size=0):
     try:
@@ -69,7 +65,7 @@ def notify_status(status="failed", file_size=0):
             "status": status,
             "anilist_id": str(anime_id),
             "episode": int(ep_num),
-            "file_size": file_size, # Main bot එකට File Size එක යැවීම
+            "file_size": file_size,
             "timestamp": time.time()
         })
     except Exception as e:
@@ -118,39 +114,39 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. EXTRACT EMBEDDED SUBTITLE & TRANSLATE ---
+# --- 2. EXTRACT EMBEDDED SUBTITLE & TRANSLATE (NO MUXING) ---
 def clean_vtt_tags(text):
     if not text: return ""
     t = str(text)
     t = re.sub(r'\{.*?\}', '', t).replace('\\h', ' ').replace('\\N', '\n')
     return re.sub(r'<[^>]+>', '', t).strip()
 
-def process_subtitles_and_mux(video_path):
+def process_and_translate_subtitle(video_path):
     print("📝 Extracting Embedded Subtitle from Video...")
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
     
-    # වීඩියෝ එක ඇතුළෙන්ම පළමු Subtitle Track එක Extract කර ගනී (No SubDL)
+    # වීඩියෝ එකෙන් සබ් එක ගන්නවා විතරයි, මුක්ස් කරන්නේ නෑ!
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
     if not os.path.exists(eng_sub) or os.path.getsize(eng_sub) < 100:
-        print("❌ Video has no embedded subtitle! Uploading raw video without translations.")
-        return video_path
+        print("❌ Video has no embedded subtitle!")
+        return None
 
     print("⚡ Translating Extracted Subtitle to Sinhala...")
     try: 
         subs = pysubs2.load(eng_sub)
     except: 
-        return video_path
+        return None
 
     unique_texts = list(set([clean_vtt_tags(e.text) for e in subs if e.text and len(clean_vtt_tags(e.text)) >= 2]))
     translation_map = {}
     
-    def translate_single_line_guaranteed(text):
+    def translate_single_line(text):
         translator = GoogleTranslator(source='auto', target='si')
         for attempt in range(5):
             try:
                 res = translator.translate(text)
-                if res and "Error 500" not in str(res) and "<!DOCTYPE html>" not in str(res):
+                if res and "Error 500" not in str(res):
                     return apply_spoken_sinhala(res)
             except: pass
             time.sleep(1 + attempt)
@@ -163,7 +159,7 @@ def process_subtitles_and_mux(video_path):
         try:
             res = translator.translate_batch(batch_chunk)
             for orig, trans in zip(batch_chunk, res):
-                if "Error 500" in str(trans) or "<!DOCTYPE html>" in str(trans):
+                if "Error 500" in str(trans):
                     failed_lines.append(orig)
                 else:
                     batch_res[orig] = apply_spoken_sinhala(trans)
@@ -171,7 +167,7 @@ def process_subtitles_and_mux(video_path):
             failed_lines = list(batch_chunk)
             
         for f_line in failed_lines:
-            batch_res[f_line] = translate_single_line_guaranteed(f_line)
+            batch_res[f_line] = translate_single_line(f_line)
             
         return batch_res
 
@@ -186,53 +182,59 @@ def process_subtitles_and_mux(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    sin_sub = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
-    subs.save(sin_sub, encoding="utf-8")
-    print("✅ Sinhala Translation Complete!")
-    
-    output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}.mkv"
-    muxed_video_path = os.path.join(OUTPUT_DIR, output_filename)
+    # Abyss API එකට යවන්න ලේසි වෙන්න VTT Format එකෙන් සේව් කරනවා
+    sin_sub_vtt = os.path.join(TEMP_SUB_DIR, "sinhala.vtt")
+    subs.save(sin_sub_vtt, encoding="utf-8")
+    print("✅ Sinhala Subtitle File Created Successfully!")
+    return sin_sub_vtt
 
-    print(f"🎬 Muxing: Adding ONLY Sinhala track [{output_filename}]...")
-    subprocess.run([
-        'ffmpeg', '-i', video_path, '-i', sin_sub,
-        '-map', '0:v', '-map', '0:a', '-map', '1:s:0',
-        '-c', 'copy', '-c:s', 'srt',
-        '-metadata:s:s:0', 'language=sin', '-metadata:s:s:0', 'title=Sinhala', '-disposition:s:s:0', 'default',
-        muxed_video_path, '-y'
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    if os.path.exists(muxed_video_path): return muxed_video_path
-    return video_path
-
-# --- 3. UPLOAD TO ABYSS.TO ---
-def upload_to_abyss(final_video_path):
-    print("☁️ Uploading Video to Abyss.to...")
+# --- 3. UPLOAD RAW VIDEO TO ABYSS.TO ---
+def upload_video_to_abyss(video_path):
+    print("☁️ Uploading RAW Video to Abyss.to...")
     try:
-        upload_filename = os.path.basename(final_video_path)
+        upload_filename = os.path.basename(video_path)
         mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
 
         fields = {
-            'file': (upload_filename, open(final_video_path, 'rb'), mime_type)
+            'file': (upload_filename, open(video_path, 'rb'), mime_type)
         }
 
         multipart_data = MultipartEncoder(fields=fields)
         headers = {'Content-Type': multipart_data.content_type}
         
         up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200).json()
-        print(f"📥 Abyss.to Response: {up_resp}")
+        print(f"📥 Abyss.to Video Response: {up_resp}")
         
-        if up_resp.get("status") == 200 or up_resp.get("success") or "document" in up_resp:
-            vhd_code = up_resp.get("id") or up_resp.get("code") or (up_resp.get("document", {}).get("id"))
+        # FIX: 'status': True සහ 'slug' අල්ලගන්න හැදුවා
+        if up_resp.get("status") is True or str(up_resp.get("status")) == "200":
+            vhd_code = up_resp.get("slug") or up_resp.get("id") or up_resp.get("code")
             if vhd_code:
-                file_size = os.path.getsize(final_video_path) # File Size එක ලබා ගැනීම
-                print(f"✅ Video Uploaded Successfully! ID: {vhd_code}")
+                file_size = os.path.getsize(video_path)
+                print(f"✅ Video Uploaded Successfully! Slug/ID: {vhd_code}")
                 return vhd_code, file_size
     except Exception as e:
-        print(f"⚠️ Abyss Upload Error: {e}")
+        print(f"⚠️ Abyss Video Upload Error: {e}")
     return None, 0
 
-# --- 4. UPDATE DATABASE ---
+# --- 4. UPLOAD SUBTITLE TO ABYSS.TO VIA API ---
+def upload_subtitle_to_abyss(vhd_code, sub_path):
+    print(f"☁️ Uploading Subtitle via API to Abyss.to ({vhd_code})...")
+    try:
+        # API Document එකට අනුව PUT Request එක යවයි
+        url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?apiKey={ABYSS_API_KEY}"
+        
+        files = {
+            'file': ('sinhala.vtt', open(sub_path, 'rb'), 'text/vtt')
+        }
+        
+        resp = requests.put(url, files=files, timeout=60)
+        print(f"📥 Subtitle API Response [{resp.status_code}]: {resp.text}")
+        if resp.status_code == 200:
+            print("✅ Subtitle Uploaded Successfully!")
+    except Exception as e:
+        print(f"⚠️ Subtitle API Upload Error: {e}")
+
+# --- 5. UPDATE DATABASE ---
 def update_database(file_code):
     print("💾 Updating Firestore...")
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
@@ -249,17 +251,25 @@ def update_database(file_code):
 original_video = download_video()
 
 if original_video:
-    final_video = process_subtitles_and_mux(original_video)
-    upload_result = upload_to_abyss(final_video)
+    # 1. Video එකෙන් Sub එක Translate කරගන්නවා (Mux කරන්නේ නෑ)
+    translated_sub_path = process_and_translate_subtitle(original_video)
+    
+    # 2. RAW Video එක Upload කරනවා
+    upload_result = upload_video_to_abyss(original_video)
     
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
+        
+        # 3. වීඩියෝ එක Upload වුණාට පස්සේ, Translate කරපු Sub එක API එකෙන් යවනවා
+        if translated_sub_path and os.path.exists(translated_sub_path):
+            upload_subtitle_to_abyss(file_code, translated_sub_path)
+        
         update_database(file_code)
-        notify_status("success", file_size) # Size එකත් එක්ක Success කියල යවනවා
+        notify_status("success", file_size)
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
         sys.exit(0)
     else:
-        print("❌ Upload Failed!")
+        print("❌ Video Upload Failed!")
         notify_status("failed", 0)
         sys.exit(1)
 else:
