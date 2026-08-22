@@ -57,11 +57,9 @@ print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: PREMIU
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
 OUTPUT_DIR = "output_hardsub"
-FONT_DIR = "fonts"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(FONT_DIR, exist_ok=True)
 
 def notify_status(status="failed", file_size=0):
     try:
@@ -118,21 +116,27 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. DOWNLOAD SINHALA FONT ---
-def download_sinhala_font():
-    font_path = os.path.join(FONT_DIR, "NotoSansSinhala-Regular.ttf")
+# --- 2. SETUP SYSTEM FONT FOR PROPER RENDERING ---
+def setup_system_font():
+    print("🔤 Setting up Sinhala Font System-wide for perfect rendering...")
+    # System font directory එකට font එක දානවා එතකොට FFmpeg එක අකුරු හරියට බඳිනවා
+    font_dir = os.path.expanduser("~/.local/share/fonts")
+    os.makedirs(font_dir, exist_ok=True)
+    font_path = os.path.join(font_dir, "NotoSansSinhala-Medium.ttf")
+    
     if not os.path.exists(font_path):
-        print("🔤 Downloading Sinhala Font for Hardsubbing...")
-        font_url = "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"
+        # Noto Sans Sinhala Medium එක අරගන්නවා ලස්සන පෙනුමකට
+        font_url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Medium.ttf"
         try:
             r = requests.get(font_url, timeout=15)
             if r.status_code == 200:
                 with open(font_path, "wb") as f:
                     f.write(r.content)
-                print("✅ Font downloaded successfully!")
         except Exception as e:
             print(f"⚠️ Font Download Error: {e}")
-    return font_path
+            
+    # Update system font cache
+    subprocess.run(['fc-cache', '-f', '-v'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # --- 3. EXTRACT, TRANSLATE & CREATE .ASS FILE ---
 def clean_vtt_tags(text):
@@ -201,42 +205,42 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # 🎨 ASS Format Styling (Premium Look for Dialogues)
+    # 🎨 ASS Format Styling (Premium Clean Look - NO OUTLINE)
     style = pysubs2.SSAStyle()
     style.fontname = "Noto Sans Sinhala"
-    style.fontsize = 24
+    style.fontsize = 20  
     style.primarycolor = pysubs2.Color(255, 255, 255) # සුදු Text
-    style.outlinecolor = pysubs2.Color(0, 0, 0)       # තද කළු Outline
+    style.outlinecolor = pysubs2.Color(0, 0, 0, 255)  # Outline අදෘශ්‍යමාන කළා
     style.borderstyle = 1
-    style.outline = 2.0  # මහත Outline එක
-    style.shadow = 0     # Shadow ඉවත් කිරීම
-    style.bold = True
-    style.alignment = 2  # පහළ මැද
-    style.MarginV = 25   # යට ඉඳන් ටිකක් උඩට
+    style.outline = 0    # Outline / Stroke එක සම්පූර්ණයෙන්ම ඉවත් කළා
+    style.shadow = 1.2   # සුදු පසුබිමකදී පේන්න පොඩි Shadow එකක් දැම්මා
+    style.bold = False   
+    style.alignment = 2  
+    style.MarginV = 20   
     subs.styles["Default"] = style
     
     # 💧 ASS Format Styling (For Watermarks - Top Center)
     wm_style = pysubs2.SSAStyle()
     wm_style.fontname = "Noto Sans Sinhala"
-    wm_style.fontsize = 26
+    wm_style.fontsize = 18 
     wm_style.primarycolor = pysubs2.Color(255, 255, 255)
-    wm_style.outlinecolor = pysubs2.Color(0, 0, 0)
+    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 255)
     wm_style.borderstyle = 1
-    wm_style.outline = 2.5
-    wm_style.shadow = 0
-    wm_style.bold = True
-    wm_style.alignment = 8 # ඉහළ මැද (Top Center)
-    wm_style.MarginV = 30
+    wm_style.outline = 0
+    wm_style.shadow = 1.2
+    wm_style.bold = False
+    wm_style.alignment = 8 
+    wm_style.MarginV = 15
     subs.styles["Watermark"] = wm_style
     
-    # 📌 Watermark Text (\N = New line, {\c&H00FFFF&} = Yellow color for Link)
-    wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&H00FFFF&}anishift.netlify.app"
+    # 📌 Watermark Text
+    wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&HFF901E&}anishift.netlify.app"
     
-    # 1. Start Watermark (තත්පර 5 සිට 15 දක්වා)
+    # Start Watermark
     start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text, style="Watermark")
     subs.insert(0, start_wm)
     
-    # 2. End Watermark (අන්තිම ඩයලොග් එකට තත්පර 2කට පස්සේ ඉඳන් තත්පර 10ක්)
+    # End Watermark
     if len(subs) > 1:
         last_time = max([e.end for e in subs if e.style == "Default"])
         end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text, style="Watermark")
@@ -244,7 +248,7 @@ def process_and_translate_subtitle(video_path):
     
     sin_sub_ass = "hardsub_temp.ass"
     subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created with Premium Styles & Watermarks!")
+    print("✅ Sinhala .ASS Subtitle File Created with PERFECT Rendering!")
     return sin_sub_ass
 
 # --- 4. HARDSUB (BURN-IN) PROCESS ---
@@ -254,9 +258,10 @@ def burn_subtitles_to_video(video_path, sub_ass_path):
     output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_Hardsubbed.mkv"
     hardsubbed_video_path = os.path.join(OUTPUT_DIR, output_filename)
     
+    # System font එක පාවිච්චි කරන නිසා fontsdir parameter එක අයින් කළා
     cmd = [
         'ffmpeg', '-i', video_path, 
-        '-vf', f"subtitles={sub_ass_path}:fontsdir={FONT_DIR}", 
+        '-vf', f"subtitles={sub_ass_path}", 
         '-c:v', 'libx264', 
         '-preset', 'fast', 
         '-crf', '24', 
@@ -314,19 +319,16 @@ def update_database(file_code):
     }, merge=True)
 
 # --- MAIN EXECUTION ---
-download_sinhala_font()
+setup_system_font()
 original_video = download_video()
 
 if original_video:
-    # 1. Subtitle Extract, Translate & Add Watermarks
     ass_sub_path = process_and_translate_subtitle(original_video)
     
-    # 2. Hardsub (Burn-in) process
     final_video = original_video
     if ass_sub_path and os.path.exists(ass_sub_path):
         final_video = burn_subtitles_to_video(original_video, ass_sub_path)
     
-    # 3. Upload the final Hardsubbed video
     upload_result = upload_video_to_abyss(final_video)
     
     if upload_result and upload_result[0]:
@@ -336,7 +338,6 @@ if original_video:
         notify_status("success", file_size)
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
         
-        # Cleanup
         if os.path.exists("hardsub_temp.ass"): os.remove("hardsub_temp.ass")
         sys.exit(0)
     else:
