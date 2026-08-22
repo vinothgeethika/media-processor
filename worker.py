@@ -20,7 +20,7 @@ except ImportError:
     SPOKEN_DICT = {}
 
 def apply_spoken_sinhala(text):
-    if not text or not SPOKEN_DICT: 
+    if not text or not SPOKEN_DICT:
         return text
     sorted_keys = sorted(SPOKEN_DICT.keys(), key=len, reverse=True)
     result_text = str(text)
@@ -41,7 +41,7 @@ if not firebase_admin._apps:
 fs_db = firestore.client()
 
 # --- ⚙️ ABYSS.TO API SETTINGS ---
-ABYSS_API_KEY = "19136c9e1c8d2cac4e0e8b612008050a"
+ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
@@ -52,7 +52,10 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: PREMIUM HARDSUB (Noto Sans Sinhala)")
+# ⭐ Sinhala-capable font — Arial has no Sinhala glyphs, this fixes the "split letters" bug
+SUB_FONT_NAME = "Noto Sans Sinhala"
+
+print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: PREMIUM HARDSUB ({SUB_FONT_NAME})")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -116,13 +119,14 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. SETUP FALLBACK FONT & FFMPEG (TO AVOID SQUARES & SPLITTING) ---
+# --- 2. SETUP FALLBACK FONT (TO AVOID SQUARES / BROKEN GLYPHS) ---
 def setup_system_font():
-    print("🔤 Setting up System Fonts to avoid squares...")
+    # GitHub සර්වර් එකේ සිංහල අකුරු කොටු/කැඩිල වෙන එක නවත්වන්න, System එකට සිංහල අකුරු Install කිරීම
+    print("🔤 Setting up System Fonts to avoid squares/broken glyphs...")
     font_dir = os.path.expanduser("~/.local/share/fonts")
     os.makedirs(font_dir, exist_ok=True)
     font_path = os.path.join(font_dir, "NotoSansSinhala-Regular.ttf")
-    
+
     if not os.path.exists(font_path):
         font_url = "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"
         try:
@@ -130,24 +134,24 @@ def setup_system_font():
             if r.status_code == 200:
                 with open(font_path, "wb") as f:
                     f.write(r.content)
+                print(f"✅ Font downloaded: {font_path}")
+            else:
+                print(f"⚠️ Font download returned status {r.status_code}")
         except Exception as e:
             print(f"⚠️ Font Download Error: {e}")
-            
-    subprocess.run(['fc-cache', '-f', '-v'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def setup_ffmpeg():
-    # අකුරු කැඩෙන එක නවත්වන්න HarfBuzz තියෙන Static FFmpeg එකක් Download කරමු
-    if not os.path.exists("./ffmpeg"):
-        print("⚙️ Downloading Static FFmpeg (with HarfBuzz support for Sinhala)...")
-        subprocess.run(["wget", "-q", "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"])
-        subprocess.run(["tar", "-xf", "ffmpeg-release-amd64-static.tar.xz"])
-        
-        extracted_folder = glob.glob("ffmpeg-*-amd64-static")[0]
-        os.rename(os.path.join(extracted_folder, "ffmpeg"), "./ffmpeg")
-        subprocess.run(["chmod", "+x", "./ffmpeg"])
-        
-        # Clean up zip files
-        subprocess.run(["rm", "-rf", extracted_folder, "ffmpeg-release-amd64-static.tar.xz"])
+    subprocess.run(['fc-cache', '-f', font_dir])
+
+    # ✅ Verify the font actually registered — this is what tells you if
+    # libass will find "Noto Sans Sinhala" or silently fall back to a broken font
+    try:
+        result = subprocess.run(['fc-list', ':lang=si'], capture_output=True, text=True)
+        if "NotoSansSinhala" in result.stdout or "Noto Sans Sinhala" in result.stdout:
+            print(f"✅ Sinhala font registered with fontconfig:\n{result.stdout.strip()}")
+        else:
+            print(f"⚠️ WARNING: Sinhala font NOT found in fontconfig list! Subtitles will break.\nfc-list output: {result.stdout}")
+    except Exception as e:
+        print(f"⚠️ Could not verify font registration: {e}")
 
 # --- 3. EXTRACT, TRANSLATE & CREATE .ASS FILE ---
 def clean_vtt_tags(text):
@@ -158,24 +162,23 @@ def clean_vtt_tags(text):
 
 def process_and_translate_subtitle(video_path):
     print("📝 Extracting Embedded Subtitle from Video...")
-    eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
-    
-    # මෙතන 'ffmpeg' වෙනුවට './ffmpeg' පාවිච්චි කරනවා
-    subprocess.run(['./ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
-    
+    eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt")
+
+    subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
+
     if not os.path.exists(eng_sub) or os.path.getsize(eng_sub) < 100:
         print("❌ Video has no embedded subtitle!")
         return None
 
     print("⚡ Translating Extracted Subtitle to Sinhala...")
-    try: 
+    try:
         subs = pysubs2.load(eng_sub)
-    except: 
+    except:
         return None
 
     unique_texts = list(set([clean_vtt_tags(e.text) for e in subs if e.text and len(clean_vtt_tags(e.text)) >= 2]))
     translation_map = {}
-    
+
     def translate_single_line(text):
         translator = GoogleTranslator(source='auto', target='si')
         for attempt in range(5):
@@ -200,10 +203,10 @@ def process_and_translate_subtitle(video_path):
                     batch_res[orig] = apply_spoken_sinhala(trans)
         except:
             failed_lines = list(batch_chunk)
-            
+
         for f_line in failed_lines:
             batch_res[f_line] = translate_single_line(f_line)
-            
+
         return batch_res
 
     chunks = [unique_texts[i:i+20] for i in range(0, len(unique_texts), 20)]
@@ -216,75 +219,76 @@ def process_and_translate_subtitle(video_path):
         if e.text:
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
-    
-    # 🎨 ASS Format Styling
+
+    # 🎨 ASS Format Styling — Sinhala-capable font (fixes broken/split conjunct letters)
     style = pysubs2.SSAStyle()
-    style.fontname = "Noto Sans Sinhala"  
-    style.fontsize = 26       
+    style.fontname = SUB_FONT_NAME
+    style.fontsize = 26
     style.primarycolor = pysubs2.Color(255, 255, 255)
-    style.outlinecolor = pysubs2.Color(0, 0, 0, 0) # Outline color එක නැති කළා
+    style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
     style.backcolor = pysubs2.Color(0, 0, 0, 0)
     style.borderstyle = 1
-    
-    style.outline = 0         # Outline එක සම්පූර්ණයෙන්ම අයින් කළා (0.0)
-    style.shadow = 1.0        # Shadow එක තියෙනවා අකුරු පැහැදිලි වෙන්න
-    style.bold = True         
-    style.alignment = 2  
-    style.MarginV = 80        
+
+    style.outline = 0         # Outline (Stroke) එක අයින් කර ඇත
+    style.shadow = 1.0        # පැහැදිලි වෙන්න Shadow එකක් විතරයි
+    style.bold = False
+    style.alignment = 2
+    style.MarginV = 90        # ⭐ පහළින් වැඩිය යනවා කියපු එකට - 50 සිට 90 දක්වා වැඩි කළා
     subs.styles["Default"] = style
-    
+
     # 💧 ASS Format Styling (For Watermarks - Top Center)
     wm_style = pysubs2.SSAStyle()
-    wm_style.fontname = "Noto Sans Sinhala"
-    wm_style.fontsize = 20 
+    wm_style.fontname = SUB_FONT_NAME
+    wm_style.fontsize = 20
     wm_style.primarycolor = pysubs2.Color(255, 255, 255)
     wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.backcolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.borderstyle = 1
-    
-    wm_style.outline = 0      # Watermark එකෙත් Outline එක අයින් කළා
+    wm_style.outline = 0
     wm_style.shadow = 1.0
-    wm_style.bold = True
-    wm_style.alignment = 8 
+    wm_style.bold = False
+    wm_style.alignment = 8
     wm_style.MarginV = 20
     subs.styles["Watermark"] = wm_style
-    
-    # 📌 Watermark Text
+
+    # 📌 Watermark Text (#1E90FF -> &HFF901E&)
     wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&HFF901E&}anishift.netlify.app"
-    
+
     start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text, style="Watermark")
     subs.insert(0, start_wm)
-    
+
     if len(subs) > 1:
         last_time = max([e.end for e in subs if e.style == "Default"])
         end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text, style="Watermark")
         subs.append(end_wm)
-    
+
     sin_sub_ass = "hardsub_temp.ass"
     subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created!")
+    print(f"✅ Sinhala .ASS Subtitle File Created with {SUB_FONT_NAME} Font!")
     return sin_sub_ass
 
 # --- 4. HARDSUB (BURN-IN) PROCESS ---
 def burn_subtitles_to_video(video_path, sub_ass_path):
     print("🔥 Starting Premium Hardsub Re-encoding Process (This may take 10-15 mins)...")
-    
+
     output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_Hardsubbed.mkv"
     hardsubbed_video_path = os.path.join(OUTPUT_DIR, output_filename)
-    
-    # මෙතනත් 'ffmpeg' වෙනුවට ඩවුන්ලෝඩ් කරපු './ffmpeg' පාවිච්චි කරනවා
+
+    # ⭐ fontsdir points ffmpeg/libass at the font we installed, so it doesn't
+    # have to guess/fallback to a font with no Sinhala glyphs
+    fonts_dir = os.path.expanduser("~/.local/share/fonts")
     cmd = [
-        './ffmpeg', '-i', video_path, 
-        '-vf', f"subtitles={sub_ass_path}", 
-        '-c:v', 'libx264', 
-        '-preset', 'fast', 
-        '-crf', '24', 
-        '-c:a', 'copy', 
+        'ffmpeg', '-i', video_path,
+        '-vf', f"subtitles={sub_ass_path}:fontsdir={fonts_dir}",
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '24',
+        '-c:a', 'copy',
         hardsubbed_video_path, '-y'
     ]
-    
+
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+
     if os.path.exists(hardsubbed_video_path) and os.path.getsize(hardsubbed_video_path) > 1000000:
         print(f"✅ Hardsubbing Complete! Output: {output_filename}")
         return hardsubbed_video_path
@@ -305,10 +309,10 @@ def upload_video_to_abyss(video_path):
 
         multipart_data = MultipartEncoder(fields=fields)
         headers = {'Content-Type': multipart_data.content_type}
-        
+
         up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200).json()
         print(f"📥 Abyss.to Video Response: {up_resp}")
-        
+
         if up_resp.get("status") is True or str(up_resp.get("status")) == "200":
             vhd_code = up_resp.get("slug") or up_resp.get("id") or up_resp.get("code")
             if vhd_code:
@@ -334,25 +338,24 @@ def update_database(file_code):
 
 # --- MAIN EXECUTION ---
 setup_system_font()
-setup_ffmpeg() # අලුතින් එකතු කරපු FFmpeg එක හදන කොටස
 original_video = download_video()
 
 if original_video:
     ass_sub_path = process_and_translate_subtitle(original_video)
-    
+
     final_video = original_video
     if ass_sub_path and os.path.exists(ass_sub_path):
         final_video = burn_subtitles_to_video(original_video, ass_sub_path)
-    
+
     upload_result = upload_video_to_abyss(final_video)
-    
+
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
-        
+
         update_database(file_code)
         notify_status("success", file_size)
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
-        
+
         if os.path.exists("hardsub_temp.ass"): os.remove("hardsub_temp.ass")
         sys.exit(0)
     else:
