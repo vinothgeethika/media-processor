@@ -6,7 +6,9 @@ import requests
 import subprocess
 import glob
 import re
+import urllib.parse
 import concurrent.futures
+import mimetypes
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
@@ -125,7 +127,6 @@ def process_and_translate_subtitle(video_path):
     print("📝 Extracting Embedded Subtitle from Video...")
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
     
-    # වීඩියෝ එකෙන් සබ් එක ගන්නවා විතරයි, මුක්ස් කරන්නේ නෑ!
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
     if not os.path.exists(eng_sub) or os.path.getsize(eng_sub) < 100:
@@ -182,11 +183,10 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # Abyss API එකට යවන්න ලේසි වෙන්න VTT Format එකෙන් සේව් කරනවා
-    sin_sub_vtt = os.path.join(TEMP_SUB_DIR, "sinhala.vtt")
-    subs.save(sin_sub_vtt, encoding="utf-8")
+    sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
+    subs.save(sin_sub_srt, encoding="utf-8")
     print("✅ Sinhala Subtitle File Created Successfully!")
-    return sin_sub_vtt
+    return sin_sub_srt
 
 # --- 3. UPLOAD RAW VIDEO TO ABYSS.TO ---
 def upload_video_to_abyss(video_path):
@@ -205,32 +205,52 @@ def upload_video_to_abyss(video_path):
         up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200).json()
         print(f"📥 Abyss.to Video Response: {up_resp}")
         
-        # FIX: 'status': True සහ 'slug' අල්ලගන්න හැදුවා
         if up_resp.get("status") is True or str(up_resp.get("status")) == "200":
             vhd_code = up_resp.get("slug") or up_resp.get("id") or up_resp.get("code")
             if vhd_code:
                 file_size = os.path.getsize(video_path)
-                print(f"✅ Video Uploaded Successfully! Slug/ID: {vhd_code}")
+                print(f"✅ Video Uploaded Successfully! Slug: {vhd_code}")
                 return vhd_code, file_size
     except Exception as e:
         print(f"⚠️ Abyss Video Upload Error: {e}")
     return None, 0
 
-# --- 4. UPLOAD SUBTITLE TO ABYSS.TO VIA API ---
+# --- 4. GET DIRECT URL & UPLOAD SUBTITLE TO ABYSS.TO ---
 def upload_subtitle_to_abyss(vhd_code, sub_path):
-    print(f"☁️ Uploading Subtitle via API to Abyss.to ({vhd_code})...")
+    print(f"☁️ Generating Direct URL for Subtitle...")
     try:
-        # API Document එකට අනුව PUT Request එක යවයි
-        url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?apiKey={ABYSS_API_KEY}"
+        # පියවර 1: Catbox හරහා සබ්ටයිටල් ෆයිල් එකට Direct URL එකක් ගැනීම
+        catbox_url = "https://catbox.moe/user/api.php"
+        files = {'fileToUpload': open(sub_path, 'rb')}
+        data = {'reqtype': 'fileupload'}
         
-        files = {
-            'file': ('sinhala.vtt', open(sub_path, 'rb'), 'text/vtt')
-        }
+        catbox_resp = requests.post(catbox_url, data=data, files=files, timeout=60)
         
-        resp = requests.put(url, files=files, timeout=60)
-        print(f"📥 Subtitle API Response [{resp.status_code}]: {resp.text}")
-        if resp.status_code == 200:
-            print("✅ Subtitle Uploaded Successfully!")
+        if catbox_resp.status_code == 200:
+            direct_sub_url = catbox_resp.text.strip()
+            print(f"✅ Subtitle Hosted at: {direct_sub_url}")
+            
+            # පියවර 2: Abyss (Hydrax) API එකට ඒ URL එක යැවීම
+            print(f"☁️ Linking Subtitle to Abyss.to ({vhd_code})...")
+            abyss_sub_api = f"https://api.hydrax.net/{ABYSS_API_KEY}/subtitle/{vhd_code}"
+            
+            payload = {
+                "label": "Sinhala",
+                "url": direct_sub_url
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            
+            abyss_resp = requests.post(abyss_sub_api, json=payload, headers=headers, timeout=60).json()
+            print(f"📥 Abyss Subtitle API Response: {abyss_resp}")
+            
+            if abyss_resp.get("status") is True:
+                print("✅ Subtitle Linked Successfully!")
+            else:
+                print("❌ Failed to link subtitle on Abyss.")
+        else:
+            print(f"❌ Failed to host subtitle on Catbox: {catbox_resp.status_code}")
+            
     except Exception as e:
         print(f"⚠️ Subtitle API Upload Error: {e}")
 
@@ -251,16 +271,14 @@ def update_database(file_code):
 original_video = download_video()
 
 if original_video:
-    # 1. Video එකෙන් Sub එක Translate කරගන්නවා (Mux කරන්නේ නෑ)
     translated_sub_path = process_and_translate_subtitle(original_video)
     
-    # 2. RAW Video එක Upload කරනවා
     upload_result = upload_video_to_abyss(original_video)
     
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # 3. වීඩියෝ එක Upload වුණාට පස්සේ, Translate කරපු Sub එක API එකෙන් යවනවා
+        # වීඩියෝ එක Upload වුණාට පස්සේ, Screenshot එකේ විදිහටම API එකෙන් සබ් එක යවමු
         if translated_sub_path and os.path.exists(translated_sub_path):
             upload_subtitle_to_abyss(file_code, translated_sub_path)
         
