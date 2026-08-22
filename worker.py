@@ -116,9 +116,8 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. SETUP FALLBACK FONT (TO AVOID SQUARES) ---
+# --- 2. SETUP FALLBACK FONT & FFMPEG (TO AVOID SQUARES & SPLITTING) ---
 def setup_system_font():
-    # GitHub සර්වර් එකේ සිංහල අකුරු කොටු වෙන එක නවත්වන්න, System එකට සිංහල අකුරු Install කිරීම
     print("🔤 Setting up System Fonts to avoid squares...")
     font_dir = os.path.expanduser("~/.local/share/fonts")
     os.makedirs(font_dir, exist_ok=True)
@@ -136,6 +135,20 @@ def setup_system_font():
             
     subprocess.run(['fc-cache', '-f', '-v'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def setup_ffmpeg():
+    # අකුරු කැඩෙන එක නවත්වන්න HarfBuzz තියෙන Static FFmpeg එකක් Download කරමු
+    if not os.path.exists("./ffmpeg"):
+        print("⚙️ Downloading Static FFmpeg (with HarfBuzz support for Sinhala)...")
+        subprocess.run(["wget", "-q", "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"])
+        subprocess.run(["tar", "-xf", "ffmpeg-release-amd64-static.tar.xz"])
+        
+        extracted_folder = glob.glob("ffmpeg-*-amd64-static")[0]
+        os.rename(os.path.join(extracted_folder, "ffmpeg"), "./ffmpeg")
+        subprocess.run(["chmod", "+x", "./ffmpeg"])
+        
+        # Clean up zip files
+        subprocess.run(["rm", "-rf", extracted_folder, "ffmpeg-release-amd64-static.tar.xz"])
+
 # --- 3. EXTRACT, TRANSLATE & CREATE .ASS FILE ---
 def clean_vtt_tags(text):
     if not text: return ""
@@ -147,7 +160,8 @@ def process_and_translate_subtitle(video_path):
     print("📝 Extracting Embedded Subtitle from Video...")
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
     
-    subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
+    # මෙතන 'ffmpeg' වෙනුවට './ffmpeg' පාවිච්චි කරනවා
+    subprocess.run(['./ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
     
     if not os.path.exists(eng_sub) or os.path.getsize(eng_sub) < 100:
         print("❌ Video has no embedded subtitle!")
@@ -203,20 +217,20 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # 🎨 ASS Format Styling (Noto Sans Sinhala Font)
+    # 🎨 ASS Format Styling
     style = pysubs2.SSAStyle()
-    style.fontname = "Noto Sans Sinhala"  # අකුරු කැඩෙන්නේ නැති වෙන්න Sinhala font එක දැම්මා
-    style.fontsize = 26       # අකුරු ටිකක් ලොකු කරා පැහැදිලි වෙන්න
+    style.fontname = "Noto Sans Sinhala"  
+    style.fontsize = 26       
     style.primarycolor = pysubs2.Color(255, 255, 255)
-    style.outlinecolor = pysubs2.Color(0, 0, 0, 255) # Outline එක කළු පාටින්
+    style.outlinecolor = pysubs2.Color(0, 0, 0, 0) # Outline color එක නැති කළා
     style.backcolor = pysubs2.Color(0, 0, 0, 0)
     style.borderstyle = 1
     
-    style.outline = 2.0       # VLC වගේ පේන්න Outline එකක් දැම්මා
-    style.shadow = 1.0        # පැහැදිලි වෙන්න Shadow එක
-    style.bold = True         # අකුරු Bold කරා
+    style.outline = 0         # Outline එක සම්පූර්ණයෙන්ම අයින් කළා (0.0)
+    style.shadow = 1.0        # Shadow එක තියෙනවා අකුරු පැහැදිලි වෙන්න
+    style.bold = True         
     style.alignment = 2  
-    style.MarginV = 80        # අකුරු ටිකක් උඩට ගත්තා (50 වෙනුවට 80)
+    style.MarginV = 80        
     subs.styles["Default"] = style
     
     # 💧 ASS Format Styling (For Watermarks - Top Center)
@@ -224,17 +238,18 @@ def process_and_translate_subtitle(video_path):
     wm_style.fontname = "Noto Sans Sinhala"
     wm_style.fontsize = 20 
     wm_style.primarycolor = pysubs2.Color(255, 255, 255)
-    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 255)
+    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.backcolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.borderstyle = 1
-    wm_style.outline = 2.0
+    
+    wm_style.outline = 0      # Watermark එකෙත් Outline එක අයින් කළා
     wm_style.shadow = 1.0
     wm_style.bold = True
     wm_style.alignment = 8 
     wm_style.MarginV = 20
     subs.styles["Watermark"] = wm_style
     
-    # 📌 Watermark Text (#1E90FF -> &HFF901E&)
+    # 📌 Watermark Text
     wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&HFF901E&}anishift.netlify.app"
     
     start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text, style="Watermark")
@@ -247,7 +262,7 @@ def process_and_translate_subtitle(video_path):
     
     sin_sub_ass = "hardsub_temp.ass"
     subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created with Noto Sans Sinhala Font!")
+    print("✅ Sinhala .ASS Subtitle File Created!")
     return sin_sub_ass
 
 # --- 4. HARDSUB (BURN-IN) PROCESS ---
@@ -257,8 +272,9 @@ def burn_subtitles_to_video(video_path, sub_ass_path):
     output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_Hardsubbed.mkv"
     hardsubbed_video_path = os.path.join(OUTPUT_DIR, output_filename)
     
+    # මෙතනත් 'ffmpeg' වෙනුවට ඩවුන්ලෝඩ් කරපු './ffmpeg' පාවිච්චි කරනවා
     cmd = [
-        'ffmpeg', '-i', video_path, 
+        './ffmpeg', '-i', video_path, 
         '-vf', f"subtitles={sub_ass_path}", 
         '-c:v', 'libx264', 
         '-preset', 'fast', 
@@ -318,6 +334,7 @@ def update_database(file_code):
 
 # --- MAIN EXECUTION ---
 setup_system_font()
+setup_ffmpeg() # අලුතින් එකතු කරපු FFmpeg එක හදන කොටස
 original_video = download_video()
 
 if original_video:
