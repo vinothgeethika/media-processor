@@ -52,7 +52,7 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: PREMIUM HARDSUB (Arial)")
+print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: PREMIUM HARDSUB (Noto Sans Sinhala)")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -203,33 +203,33 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # 🎨 ASS Format Styling (Arial Font)
+    # 🎨 ASS Format Styling (Noto Sans Sinhala Font)
     style = pysubs2.SSAStyle()
-    style.fontname = "Arial"  # ඔයා ඉල්ලපු Arial ෆොන්ට් එක
-    style.fontsize = 24       # සාමාන්‍ය ප්‍රමාණය
+    style.fontname = "Noto Sans Sinhala"  # අකුරු කැඩෙන්නේ නැති වෙන්න Sinhala font එක දැම්මා
+    style.fontsize = 26       # අකුරු ටිකක් ලොකු කරා පැහැදිලි වෙන්න
     style.primarycolor = pysubs2.Color(255, 255, 255)
-    style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
+    style.outlinecolor = pysubs2.Color(0, 0, 0, 255) # Outline එක කළු පාටින්
     style.backcolor = pysubs2.Color(0, 0, 0, 0)
     style.borderstyle = 1
     
-    style.outline = 0         # Outline (Stroke) එක අයින් කර ඇත
-    style.shadow = 1.0        # පැහැදිලි වෙන්න Shadow එකක් විතරයි
-    style.bold = False   
+    style.outline = 2.0       # VLC වගේ පේන්න Outline එකක් දැම්මා
+    style.shadow = 1.0        # පැහැදිලි වෙන්න Shadow එක
+    style.bold = True         # අකුරු Bold කරා
     style.alignment = 2  
-    style.MarginV = 50        # අකුරු ටිකක් උඩට කර ඇත
+    style.MarginV = 80        # අකුරු ටිකක් උඩට ගත්තා (50 වෙනුවට 80)
     subs.styles["Default"] = style
     
     # 💧 ASS Format Styling (For Watermarks - Top Center)
     wm_style = pysubs2.SSAStyle()
-    wm_style.fontname = "Arial"
+    wm_style.fontname = "Noto Sans Sinhala"
     wm_style.fontsize = 20 
     wm_style.primarycolor = pysubs2.Color(255, 255, 255)
-    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
+    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 255)
     wm_style.backcolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.borderstyle = 1
-    wm_style.outline = 0
+    wm_style.outline = 2.0
     wm_style.shadow = 1.0
-    wm_style.bold = False
+    wm_style.bold = True
     wm_style.alignment = 8 
     wm_style.MarginV = 20
     subs.styles["Watermark"] = wm_style
@@ -247,7 +247,7 @@ def process_and_translate_subtitle(video_path):
     
     sin_sub_ass = "hardsub_temp.ass"
     subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created with Arial Font!")
+    print("✅ Sinhala .ASS Subtitle File Created with Noto Sans Sinhala Font!")
     return sin_sub_ass
 
 # --- 4. HARDSUB (BURN-IN) PROCESS ---
