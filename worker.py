@@ -183,7 +183,6 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # Save as SRT format
     sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
     subs.save(sin_sub_srt, encoding="utf-8")
     print("✅ Sinhala Subtitle File Created Successfully!")
@@ -216,35 +215,66 @@ def upload_video_to_abyss(video_path):
         print(f"⚠️ Abyss Video Upload Error: {e}")
     return None, 0
 
-# --- 4. UPLOAD SUBTITLE DIRECTLY TO ABYSS API ---
+# --- 4. ROBUST SUBTITLE UPLOADER (MULTI-AUTH + FALLBACK) ---
 def upload_subtitle_to_abyss(vhd_code, sub_path):
-    print(f"☁️ Uploading Subtitle File directly to Abyss.to ({vhd_code})...")
+    print(f"☁️ Attempting to Link Subtitle to Abyss.to ({vhd_code})...")
+    
     try:
-        # Document එකේ විදිහටම Query Parameters සකස් කිරීම
-        url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
-        
-        # Headers සකස් කිරීම
-        headers = {
-            "Authorization": f"Bearer {ABYSS_API_KEY}",
-            "Content-Type": "application/octet-stream"
-        }
-        
-        # Binary විදිහට Subtitle file එක කියවීම
         with open(sub_path, 'rb') as f:
             sub_data = f.read()
+
+        base_url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
+        
+        # METHOD 1: Try multiple Authentication formats to bypass 401 error
+        auth_attempts = [
+            {"headers": {"Authorization": f"Bearer {ABYSS_API_KEY}", "Content-Type": "application/octet-stream"}, "url": base_url},
+            {"headers": {"Content-Type": "application/octet-stream"}, "url": f"{base_url}&apiKey={ABYSS_API_KEY}"},
+            {"headers": {"apiKey": ABYSS_API_KEY, "Content-Type": "application/octet-stream"}, "url": base_url}
+        ]
+        
+        success = False
+        for attempt in auth_attempts:
+            print(f"🔄 Trying Auth Method... Headers: {list(attempt['headers'].keys())}")
+            resp = requests.put(attempt['url'], headers=attempt['headers'], data=sub_data, timeout=45)
+            print(f"📥 Abyss API Response [{resp.status_code}]: {resp.text}")
             
-        # curl --data-binary එකට සමානව PUT Request එක යැවීම
-        resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
+            if resp.status_code == 200:
+                print("✅ Subtitle Uploaded Successfully via Direct API!")
+                success = True
+                break
         
-        print(f"📥 Abyss Subtitle API Response [{resp.status_code}]: {resp.text}")
+        if success:
+            return
+
+        # METHOD 2: Fallback (Upload to File.io -> Send URL to Hydrax JSON API)
+        print("⚠️ Direct API failed with 401. Switching to Fallback (Hydrax JSON API via file.io)...")
         
-        if resp.status_code == 200:
-            print("✅ Subtitle Uploaded and Linked Successfully!")
+        # 1. Upload to File.io (Anonymous, temporary fast host)
+        fio_resp = requests.post("https://file.io", files={"file": open(sub_path, 'rb')}, timeout=30).json()
+        
+        if fio_resp.get("success"):
+            direct_url = fio_resp["link"]
+            print(f"✅ Subtitle Hosted temporarily at: {direct_url}")
+            
+            # 2. Link it using the exact method in your Hydrax Document
+            hydrax_url = f"https://api.hydrax.net/{ABYSS_API_KEY}/subtitle/{vhd_code}"
+            payload = {
+                "label": "Sinhala",
+                "url": direct_url
+            }
+            
+            h_resp = requests.post(hydrax_url, json=payload, headers={"Content-Type": "application/json"}).json()
+            print(f"📥 Hydrax Fallback Response: {h_resp}")
+            
+            if h_resp.get("status") is True:
+                print("✅ Subtitle Linked Successfully via Fallback!")
+            else:
+                print("❌ Fallback linking failed.")
         else:
-            print(f"❌ Failed to upload subtitle: {resp.status_code}")
-            
+            print("❌ Failed to upload subtitle to fallback host.")
+
     except Exception as e:
-        print(f"⚠️ Subtitle API Upload Error: {e}")
+        print(f"⚠️ Subtitle Upload Complete Error: {e}")
 
 # --- 5. UPDATE DATABASE ---
 def update_database(file_code):
@@ -270,7 +300,7 @@ if original_video:
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # ඔයා දුන්න Document එකේ විදිහට Subtitle ෆයිල් එක කෙලින්ම යවමු
+        # Subtitle එක Upload කරලා ලින්ක් කරනවා
         if translated_sub_path and os.path.exists(translated_sub_path):
             upload_subtitle_to_abyss(file_code, translated_sub_path)
         
