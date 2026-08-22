@@ -183,6 +183,7 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
+    # Save as SRT format
     sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
     subs.save(sin_sub_srt, encoding="utf-8")
     print("✅ Sinhala Subtitle File Created Successfully!")
@@ -215,41 +216,32 @@ def upload_video_to_abyss(video_path):
         print(f"⚠️ Abyss Video Upload Error: {e}")
     return None, 0
 
-# --- 4. GET DIRECT URL & UPLOAD SUBTITLE TO ABYSS.TO ---
+# --- 4. UPLOAD SUBTITLE DIRECTLY TO ABYSS API ---
 def upload_subtitle_to_abyss(vhd_code, sub_path):
-    print(f"☁️ Generating Direct URL for Subtitle...")
+    print(f"☁️ Uploading Subtitle File directly to Abyss.to ({vhd_code})...")
     try:
-        # පියවර 1: Catbox හරහා සබ්ටයිටල් ෆයිල් එකට Direct URL එකක් ගැනීම
-        catbox_url = "https://catbox.moe/user/api.php"
-        files = {'fileToUpload': open(sub_path, 'rb')}
-        data = {'reqtype': 'fileupload'}
+        # Document එකේ විදිහටම Query Parameters සකස් කිරීම
+        url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
         
-        catbox_resp = requests.post(catbox_url, data=data, files=files, timeout=60)
+        # Headers සකස් කිරීම
+        headers = {
+            "Authorization": f"Bearer {ABYSS_API_KEY}",
+            "Content-Type": "application/octet-stream"
+        }
         
-        if catbox_resp.status_code == 200:
-            direct_sub_url = catbox_resp.text.strip()
-            print(f"✅ Subtitle Hosted at: {direct_sub_url}")
+        # Binary විදිහට Subtitle file එක කියවීම
+        with open(sub_path, 'rb') as f:
+            sub_data = f.read()
             
-            # පියවර 2: Abyss (Hydrax) API එකට ඒ URL එක යැවීම
-            print(f"☁️ Linking Subtitle to Abyss.to ({vhd_code})...")
-            abyss_sub_api = f"https://api.hydrax.net/{ABYSS_API_KEY}/subtitle/{vhd_code}"
-            
-            payload = {
-                "label": "Sinhala",
-                "url": direct_sub_url
-            }
-            
-            headers = {"Content-Type": "application/json"}
-            
-            abyss_resp = requests.post(abyss_sub_api, json=payload, headers=headers, timeout=60).json()
-            print(f"📥 Abyss Subtitle API Response: {abyss_resp}")
-            
-            if abyss_resp.get("status") is True:
-                print("✅ Subtitle Linked Successfully!")
-            else:
-                print("❌ Failed to link subtitle on Abyss.")
+        # curl --data-binary එකට සමානව PUT Request එක යැවීම
+        resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
+        
+        print(f"📥 Abyss Subtitle API Response [{resp.status_code}]: {resp.text}")
+        
+        if resp.status_code == 200:
+            print("✅ Subtitle Uploaded and Linked Successfully!")
         else:
-            print(f"❌ Failed to host subtitle on Catbox: {catbox_resp.status_code}")
+            print(f"❌ Failed to upload subtitle: {resp.status_code}")
             
     except Exception as e:
         print(f"⚠️ Subtitle API Upload Error: {e}")
@@ -278,7 +270,7 @@ if original_video:
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # වීඩියෝ එක Upload වුණාට පස්සේ, Screenshot එකේ විදිහටම API එකෙන් සබ් එක යවමු
+        # ඔයා දුන්න Document එකේ විදිහට Subtitle ෆයිල් එක කෙලින්ම යවමු
         if translated_sub_path and os.path.exists(translated_sub_path):
             upload_subtitle_to_abyss(file_code, translated_sub_path)
         
