@@ -40,7 +40,7 @@ if not firebase_admin._apps:
     })
 fs_db = firestore.client()
 
-# --- ⚙️ ABYSS.TO API SETTINGS (FIXED API KEY) ---
+# --- ⚙️ ABYSS.TO API SETTINGS ---
 ABYSS_API_KEY = "19136c9e1c8d2cac4e0e8b612008050a"
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
@@ -52,14 +52,12 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: PREMIUM HARDSUB (Arial)")
+print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: API SUBTITLE (No Re-encode)")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
-OUTPUT_DIR = "output_hardsub"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def notify_status(status="failed", file_size=0):
     try:
@@ -116,26 +114,7 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. SETUP FALLBACK FONT (TO AVOID SQUARES) ---
-def setup_system_font():
-    print("🔤 Setting up System Fonts to avoid squares...")
-    font_dir = os.path.expanduser("~/.local/share/fonts")
-    os.makedirs(font_dir, exist_ok=True)
-    font_path = os.path.join(font_dir, "NotoSansSinhala-Regular.ttf")
-    
-    if not os.path.exists(font_path):
-        font_url = "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"
-        try:
-            r = requests.get(font_url, timeout=15)
-            if r.status_code == 200:
-                with open(font_path, "wb") as f:
-                    f.write(r.content)
-        except Exception as e:
-            print(f"⚠️ Font Download Error: {e}")
-            
-    subprocess.run(['fc-cache', '-f', '-v'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-# --- 3. EXTRACT, TRANSLATE & CREATE .ASS FILE ---
+# --- 2. EXTRACT & TRANSLATE SUBTITLE TO SRT ---
 def clean_vtt_tags(text):
     if not text: return ""
     t = str(text)
@@ -201,108 +180,88 @@ def process_and_translate_subtitle(video_path):
         if e.text:
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
+            
+    # 📌 Watermark Text (SRT වලට HTML Tags පාවිච්චි කරනවා)
+    wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\n<font color=\"#1E90FF\">anishift.netlify.app</font>"
     
-    # 🎨 ASS Format Styling (Arial Font)
-    style = pysubs2.SSAStyle()
-    style.fontname = "Arial"
-    style.fontsize = 24       
-    style.primarycolor = pysubs2.Color(255, 255, 255)
-    style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
-    style.backcolor = pysubs2.Color(0, 0, 0, 0)
-    style.borderstyle = 1
-    
-    style.outline = 0         
-    style.shadow = 1.0        
-    style.bold = False   
-    style.alignment = 2  
-    style.MarginV = 50        
-    subs.styles["Default"] = style
-    
-    # 💧 ASS Format Styling (For Watermarks - Top Center)
-    wm_style = pysubs2.SSAStyle()
-    wm_style.fontname = "Arial"
-    wm_style.fontsize = 20 
-    wm_style.primarycolor = pysubs2.Color(255, 255, 255)
-    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
-    wm_style.backcolor = pysubs2.Color(0, 0, 0, 0)
-    wm_style.borderstyle = 1
-    wm_style.outline = 0
-    wm_style.shadow = 1.0
-    wm_style.bold = False
-    wm_style.alignment = 8 
-    wm_style.MarginV = 20
-    subs.styles["Watermark"] = wm_style
-    
-    # 📌 Watermark Text
-    wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&HFF901E&}anishift.netlify.app"
-    
-    start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text, style="Watermark")
+    start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text)
     subs.insert(0, start_wm)
     
     if len(subs) > 1:
-        last_time = max([e.end for e in subs if e.style == "Default"])
-        end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text, style="Watermark")
+        last_time = max([e.end for e in subs if e.text != wm_text])
+        end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text)
         subs.append(end_wm)
-    
-    sin_sub_ass = "hardsub_temp.ass"
-    subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created with Arial Font!")
-    return sin_sub_ass
 
-# --- 4. HARDSUB (BURN-IN) PROCESS ---
-def burn_subtitles_to_video(video_path, sub_ass_path):
-    print("🔥 Starting Premium Hardsub Re-encoding Process (This may take 10-15 mins)...")
-    
-    output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_Hardsubbed.mkv"
-    hardsubbed_video_path = os.path.join(OUTPUT_DIR, output_filename)
-    
-    cmd = [
-        'ffmpeg', '-i', video_path, 
-        '-vf', f"subtitles={sub_ass_path}", 
-        '-c:v', 'libx264', 
-        '-preset', 'fast', 
-        '-crf', '24', 
-        '-c:a', 'copy', 
-        hardsubbed_video_path, '-y'
-    ]
-    
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    if os.path.exists(hardsubbed_video_path) and os.path.getsize(hardsubbed_video_path) > 1000000:
-        print(f"✅ Hardsubbing Complete! Output: {output_filename}")
-        return hardsubbed_video_path
-    else:
-        print("❌ Hardsubbing Failed! Uploading original video instead.")
-        return video_path
+    # Save as standard SRT file
+    sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
+    subs.save(sin_sub_srt, encoding="utf-8")
+    print("✅ Sinhala .SRT Subtitle File Created!")
+    return sin_sub_srt
 
-# --- 5. UPLOAD VIDEO TO ABYSS.TO ---
+# --- 3. UPLOAD RAW VIDEO TO ABYSS.TO ---
 def upload_video_to_abyss(video_path):
-    print("☁️ Uploading Video to Abyss.to...")
-    try:
-        upload_filename = os.path.basename(video_path)
-        mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
+    print("☁️ Uploading RAW Video to Abyss.to...")
+    upload_filename = os.path.basename(video_path)
+    mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
 
-        fields = {
-            'file': (upload_filename, open(video_path, 'rb'), mime_type)
-        }
+    for attempt in range(3):
+        try:
+            fields = {'file': (upload_filename, open(video_path, 'rb'), mime_type)}
+            multipart_data = MultipartEncoder(fields=fields)
+            
+            headers = {
+                'Content-Type': multipart_data.content_type,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+            }
 
-        multipart_data = MultipartEncoder(fields=fields)
-        headers = {'Content-Type': multipart_data.content_type}
-        
-        up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200).json()
-        print(f"📥 Abyss.to Video Response: {up_resp}")
-        
-        if up_resp.get("status") is True or str(up_resp.get("status")) == "200":
-            vhd_code = up_resp.get("slug") or up_resp.get("id") or up_resp.get("code")
-            if vhd_code:
-                file_size = os.path.getsize(video_path)
-                print(f"✅ Video Uploaded Successfully! Slug: {vhd_code}")
-                return vhd_code, file_size
-    except Exception as e:
-        print(f"⚠️ Abyss Video Upload Error: {e}")
+            up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200)
+            
+            try:
+                resp_data = up_resp.json()
+            except json.JSONDecodeError:
+                if attempt < 2: time.sleep(15)
+                continue
+
+            if resp_data.get("status") is True or str(resp_data.get("status")) == "200":
+                vhd_code = resp_data.get("slug") or resp_data.get("id") or resp_data.get("code")
+                if vhd_code:
+                    file_size = os.path.getsize(video_path)
+                    print(f"✅ Video Uploaded Successfully! Slug: {vhd_code}")
+                    return vhd_code, file_size
+
+        except Exception as e:
+            if attempt < 2: time.sleep(15)
+                
     return None, 0
 
-# --- 6. UPDATE DATABASE ---
+# --- 4. UPLOAD SUBTITLE TO ABYSS API (BINARY METHOD) ---
+def upload_subtitle_to_abyss_api(vhd_code, srt_path):
+    print(f"☁️ Uploading Subtitle directly to Abyss API for {vhd_code}...")
+    try:
+        # Document එකේ තියෙන විදිහටම API එකට යවනවා
+        url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
+        
+        headers = {
+            "Authorization": f"Bearer {ABYSS_API_KEY}",
+            "Content-Type": "application/octet-stream",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        
+        with open(srt_path, "rb") as f:
+            sub_data = f.read()
+            
+        resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
+        
+        print(f"📥 Abyss Subtitle API Response [{resp.status_code}]: {resp.text}")
+        if resp.status_code == 200:
+            print("✅ Subtitle Attached Successfully via API!")
+        else:
+            print(f"❌ Failed to attach subtitle. Code: {resp.status_code}")
+            
+    except Exception as e:
+        print(f"⚠️ Subtitle API Error: {e}")
+
+# --- 5. UPDATE DATABASE ---
 def update_database(file_code):
     print("💾 Updating Firestore...")
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
@@ -316,26 +275,23 @@ def update_database(file_code):
     }, merge=True)
 
 # --- MAIN EXECUTION ---
-setup_system_font()
 original_video = download_video()
 
 if original_video:
-    ass_sub_path = process_and_translate_subtitle(original_video)
+    srt_sub_path = process_and_translate_subtitle(original_video)
     
-    final_video = original_video
-    if ass_sub_path and os.path.exists(ass_sub_path):
-        final_video = burn_subtitles_to_video(original_video, ass_sub_path)
-    
-    upload_result = upload_video_to_abyss(final_video)
+    upload_result = upload_video_to_abyss(original_video)
     
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
+        # වීඩියෝ එක Upload වුණාට පස්සේ සබ්ටයිටල් එක API එකෙන් යවනවා
+        if srt_sub_path and os.path.exists(srt_sub_path):
+            upload_subtitle_to_abyss_api(file_code, srt_sub_path)
+            
         update_database(file_code)
         notify_status("success", file_size)
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
-        
-        if os.path.exists("hardsub_temp.ass"): os.remove("hardsub_temp.ass")
         sys.exit(0)
     else:
         print("❌ Video Upload Failed!")
