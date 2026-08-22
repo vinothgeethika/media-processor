@@ -6,9 +6,7 @@ import requests
 import subprocess
 import glob
 import re
-import urllib.parse
 import concurrent.futures
-import mimetypes
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
@@ -54,12 +52,16 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num}")
+print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: HARDSUB")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
+OUTPUT_DIR = "output_hardsub"
+FONT_DIR = "fonts"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(FONT_DIR, exist_ok=True)
 
 def notify_status(status="failed", file_size=0):
     try:
@@ -116,7 +118,23 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. EXTRACT EMBEDDED SUBTITLE & TRANSLATE (NO MUXING) ---
+# --- 2. DOWNLOAD SINHALA FONT ---
+def download_sinhala_font():
+    font_path = os.path.join(FONT_DIR, "NotoSansSinhala-Regular.ttf")
+    if not os.path.exists(font_path):
+        print("🔤 Downloading Sinhala Font for Hardsubbing...")
+        font_url = "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"
+        try:
+            r = requests.get(font_url, timeout=15)
+            if r.status_code == 200:
+                with open(font_path, "wb") as f:
+                    f.write(r.content)
+                print("✅ Font downloaded successfully!")
+        except Exception as e:
+            print(f"⚠️ Font Download Error: {e}")
+    return font_path
+
+# --- 3. EXTRACT, TRANSLATE & CREATE .ASS FILE ---
 def clean_vtt_tags(text):
     if not text: return ""
     t = str(text)
@@ -183,14 +201,55 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
-    subs.save(sin_sub_srt, encoding="utf-8")
-    print("✅ Sinhala Subtitle File Created Successfully!")
-    return sin_sub_srt
+    # 🎨 ASS Format Styling (For Hardsub)
+    style = pysubs2.SSAStyle()
+    style.fontname = "Noto Sans Sinhala"
+    style.fontsize = 22
+    style.primarycolor = pysubs2.Color(255, 255, 255) # White Text
+    style.outlinecolor = pysubs2.Color(0, 0, 0)       # Black Outline
+    style.borderstyle = 1
+    style.outline = 1.5
+    style.shadow = 0.5
+    style.bold = True
+    subs.styles["Default"] = style
+    
+    # FFmpeg Subtitles filter is sensitive to spaces and brackets in paths
+    # So we save it as a simple filename in the root directory for rendering
+    sin_sub_ass = "hardsub_temp.ass"
+    subs.save(sin_sub_ass, encoding="utf-8")
+    print("✅ Sinhala .ASS Subtitle File Created for Hardsubbing!")
+    return sin_sub_ass
 
-# --- 3. UPLOAD RAW VIDEO TO ABYSS.TO ---
+# --- 4. HARDSUB (BURN-IN) PROCESS ---
+def burn_subtitles_to_video(video_path, sub_ass_path):
+    print("🔥 Starting Hardsub Re-encoding Process (This may take 10-15 mins)...")
+    
+    output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_Hardsubbed.mkv"
+    hardsubbed_video_path = os.path.join(OUTPUT_DIR, output_filename)
+    
+    # Using 'fast' preset for speed, crf 24 to maintain good quality with small size
+    cmd = [
+        'ffmpeg', '-i', video_path, 
+        '-vf', f"subtitles={sub_ass_path}:fontsdir={FONT_DIR}", 
+        '-c:v', 'libx264', 
+        '-preset', 'fast', 
+        '-crf', '24', 
+        '-c:a', 'copy', 
+        hardsubbed_video_path, '-y'
+    ]
+    
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    if os.path.exists(hardsubbed_video_path) and os.path.getsize(hardsubbed_video_path) > 1000000:
+        print(f"✅ Hardsubbing Complete! Output: {output_filename}")
+        return hardsubbed_video_path
+    else:
+        print("❌ Hardsubbing Failed! Uploading original video instead.")
+        return video_path
+
+# --- 5. UPLOAD VIDEO TO ABYSS.TO ---
 def upload_video_to_abyss(video_path):
-    print("☁️ Uploading RAW Video to Abyss.to...")
+    print("☁️ Uploading Video to Abyss.to...")
     try:
         upload_filename = os.path.basename(video_path)
         mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
@@ -215,68 +274,7 @@ def upload_video_to_abyss(video_path):
         print(f"⚠️ Abyss Video Upload Error: {e}")
     return None, 0
 
-# --- 4. ROBUST SUBTITLE UPLOADER (MULTI-AUTH + FALLBACK) ---
-def upload_subtitle_to_abyss(vhd_code, sub_path):
-    print(f"☁️ Attempting to Link Subtitle to Abyss.to ({vhd_code})...")
-    
-    try:
-        with open(sub_path, 'rb') as f:
-            sub_data = f.read()
-
-        base_url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
-        
-        # METHOD 1: Try multiple Authentication formats to bypass 401 error
-        auth_attempts = [
-            {"headers": {"Authorization": f"Bearer {ABYSS_API_KEY}", "Content-Type": "application/octet-stream"}, "url": base_url},
-            {"headers": {"Content-Type": "application/octet-stream"}, "url": f"{base_url}&apiKey={ABYSS_API_KEY}"},
-            {"headers": {"apiKey": ABYSS_API_KEY, "Content-Type": "application/octet-stream"}, "url": base_url}
-        ]
-        
-        success = False
-        for attempt in auth_attempts:
-            print(f"🔄 Trying Auth Method... Headers: {list(attempt['headers'].keys())}")
-            resp = requests.put(attempt['url'], headers=attempt['headers'], data=sub_data, timeout=45)
-            print(f"📥 Abyss API Response [{resp.status_code}]: {resp.text}")
-            
-            if resp.status_code == 200:
-                print("✅ Subtitle Uploaded Successfully via Direct API!")
-                success = True
-                break
-        
-        if success:
-            return
-
-        # METHOD 2: Fallback (Upload to File.io -> Send URL to Hydrax JSON API)
-        print("⚠️ Direct API failed with 401. Switching to Fallback (Hydrax JSON API via file.io)...")
-        
-        # 1. Upload to File.io (Anonymous, temporary fast host)
-        fio_resp = requests.post("https://file.io", files={"file": open(sub_path, 'rb')}, timeout=30).json()
-        
-        if fio_resp.get("success"):
-            direct_url = fio_resp["link"]
-            print(f"✅ Subtitle Hosted temporarily at: {direct_url}")
-            
-            # 2. Link it using the exact method in your Hydrax Document
-            hydrax_url = f"https://api.hydrax.net/{ABYSS_API_KEY}/subtitle/{vhd_code}"
-            payload = {
-                "label": "Sinhala",
-                "url": direct_url
-            }
-            
-            h_resp = requests.post(hydrax_url, json=payload, headers={"Content-Type": "application/json"}).json()
-            print(f"📥 Hydrax Fallback Response: {h_resp}")
-            
-            if h_resp.get("status") is True:
-                print("✅ Subtitle Linked Successfully via Fallback!")
-            else:
-                print("❌ Fallback linking failed.")
-        else:
-            print("❌ Failed to upload subtitle to fallback host.")
-
-    except Exception as e:
-        print(f"⚠️ Subtitle Upload Complete Error: {e}")
-
-# --- 5. UPDATE DATABASE ---
+# --- 6. UPDATE DATABASE ---
 def update_database(file_code):
     print("💾 Updating Firestore...")
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
@@ -290,23 +288,30 @@ def update_database(file_code):
     }, merge=True)
 
 # --- MAIN EXECUTION ---
+download_sinhala_font()
 original_video = download_video()
 
 if original_video:
-    translated_sub_path = process_and_translate_subtitle(original_video)
+    # 1. Subtitle Extract & Translate
+    ass_sub_path = process_and_translate_subtitle(original_video)
     
-    upload_result = upload_video_to_abyss(original_video)
+    # 2. Hardsub (Burn-in) process
+    final_video = original_video
+    if ass_sub_path and os.path.exists(ass_sub_path):
+        final_video = burn_subtitles_to_video(original_video, ass_sub_path)
+    
+    # 3. Upload the final Hardsubbed video
+    upload_result = upload_video_to_abyss(final_video)
     
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # Subtitle එක Upload කරලා ලින්ක් කරනවා
-        if translated_sub_path and os.path.exists(translated_sub_path):
-            upload_subtitle_to_abyss(file_code, translated_sub_path)
-        
         update_database(file_code)
         notify_status("success", file_size)
         print("🎉 WORKER COMPLETED SUCCESSFULLY!")
+        
+        # Cleanup
+        if os.path.exists("hardsub_temp.ass"): os.remove("hardsub_temp.ass")
         sys.exit(0)
     else:
         print("❌ Video Upload Failed!")
