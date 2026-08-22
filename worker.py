@@ -52,7 +52,7 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: HARDSUB")
+print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: PREMIUM HARDSUB")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -201,33 +201,59 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # 🎨 ASS Format Styling (For Hardsub)
+    # 🎨 ASS Format Styling (Premium Look for Dialogues)
     style = pysubs2.SSAStyle()
     style.fontname = "Noto Sans Sinhala"
-    style.fontsize = 22
-    style.primarycolor = pysubs2.Color(255, 255, 255) # White Text
-    style.outlinecolor = pysubs2.Color(0, 0, 0)       # Black Outline
+    style.fontsize = 24
+    style.primarycolor = pysubs2.Color(255, 255, 255) # සුදු Text
+    style.outlinecolor = pysubs2.Color(0, 0, 0)       # තද කළු Outline
     style.borderstyle = 1
-    style.outline = 1.5
-    style.shadow = 0.5
+    style.outline = 2.0  # මහත Outline එක
+    style.shadow = 0     # Shadow ඉවත් කිරීම
     style.bold = True
+    style.alignment = 2  # පහළ මැද
+    style.MarginV = 25   # යට ඉඳන් ටිකක් උඩට
     subs.styles["Default"] = style
     
-    # FFmpeg Subtitles filter is sensitive to spaces and brackets in paths
-    # So we save it as a simple filename in the root directory for rendering
+    # 💧 ASS Format Styling (For Watermarks - Top Center)
+    wm_style = pysubs2.SSAStyle()
+    wm_style.fontname = "Noto Sans Sinhala"
+    wm_style.fontsize = 26
+    wm_style.primarycolor = pysubs2.Color(255, 255, 255)
+    wm_style.outlinecolor = pysubs2.Color(0, 0, 0)
+    wm_style.borderstyle = 1
+    wm_style.outline = 2.5
+    wm_style.shadow = 0
+    wm_style.bold = True
+    wm_style.alignment = 8 # ඉහළ මැද (Top Center)
+    wm_style.MarginV = 30
+    subs.styles["Watermark"] = wm_style
+    
+    # 📌 Watermark Text (\N = New line, {\c&H00FFFF&} = Yellow color for Link)
+    wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&H00FFFF&}anishift.netlify.app"
+    
+    # 1. Start Watermark (තත්පර 5 සිට 15 දක්වා)
+    start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text, style="Watermark")
+    subs.insert(0, start_wm)
+    
+    # 2. End Watermark (අන්තිම ඩයලොග් එකට තත්පර 2කට පස්සේ ඉඳන් තත්පර 10ක්)
+    if len(subs) > 1:
+        last_time = max([e.end for e in subs if e.style == "Default"])
+        end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text, style="Watermark")
+        subs.append(end_wm)
+    
     sin_sub_ass = "hardsub_temp.ass"
     subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created for Hardsubbing!")
+    print("✅ Sinhala .ASS Subtitle File Created with Premium Styles & Watermarks!")
     return sin_sub_ass
 
 # --- 4. HARDSUB (BURN-IN) PROCESS ---
 def burn_subtitles_to_video(video_path, sub_ass_path):
-    print("🔥 Starting Hardsub Re-encoding Process (This may take 10-15 mins)...")
+    print("🔥 Starting Premium Hardsub Re-encoding Process (This may take 10-15 mins)...")
     
     output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_Hardsubbed.mkv"
     hardsubbed_video_path = os.path.join(OUTPUT_DIR, output_filename)
     
-    # Using 'fast' preset for speed, crf 24 to maintain good quality with small size
     cmd = [
         'ffmpeg', '-i', video_path, 
         '-vf', f"subtitles={sub_ass_path}:fontsdir={FONT_DIR}", 
@@ -292,7 +318,7 @@ download_sinhala_font()
 original_video = download_video()
 
 if original_video:
-    # 1. Subtitle Extract & Translate
+    # 1. Subtitle Extract, Translate & Add Watermarks
     ass_sub_path = process_and_translate_subtitle(original_video)
     
     # 2. Hardsub (Burn-in) process
