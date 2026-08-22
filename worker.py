@@ -116,17 +116,16 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. SETUP SYSTEM FONT FOR PROPER RENDERING ---
+# --- 2. SETUP NEW SINHALA FONT (Abhaya Libre) ---
 def setup_system_font():
-    print("🔤 Setting up Sinhala Font System-wide for perfect rendering...")
-    # System font directory එකට font එක දානවා එතකොට FFmpeg එක අකුරු හරියට බඳිනවා
+    print("🔤 Setting up New Sinhala Font (Abhaya Libre) for perfect rendering...")
     font_dir = os.path.expanduser("~/.local/share/fonts")
     os.makedirs(font_dir, exist_ok=True)
-    font_path = os.path.join(font_dir, "NotoSansSinhala-Medium.ttf")
+    font_path = os.path.join(font_dir, "AbhayaLibre-SemiBold.ttf")
     
     if not os.path.exists(font_path):
-        # Noto Sans Sinhala Medium එක අරගන්නවා ලස්සන පෙනුමකට
-        font_url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Medium.ttf"
+        # Abhaya Libre කියන්නේ ඔයාගේ Screenshot එකට ගොඩක් සමාන ලස්සන Font එකක්
+        font_url = "https://raw.githubusercontent.com/mooniak/abhaya-libre-font/master/fonts/ttf/AbhayaLibre-SemiBold.ttf"
         try:
             r = requests.get(font_url, timeout=15)
             if r.status_code == 200:
@@ -205,42 +204,42 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # 🎨 ASS Format Styling (Premium Clean Look - NO OUTLINE)
+    # 🎨 ASS Format Styling
     style = pysubs2.SSAStyle()
-    style.fontname = "Noto Sans Sinhala"
-    style.fontsize = 20  
-    style.primarycolor = pysubs2.Color(255, 255, 255) # සුදු Text
-    style.outlinecolor = pysubs2.Color(0, 0, 0, 255)  # Outline අදෘශ්‍යමාන කළා
+    style.fontname = "Abhaya Libre"  # අලුත් Font එක
+    style.fontsize = 24  
+    style.primarycolor = pysubs2.Color(255, 255, 255)
+    style.outlinecolor = pysubs2.Color(0, 0, 0, 255)  
+    style.backcolor = pysubs2.Color(0, 0, 0, 0) # Black Shadow Color
     style.borderstyle = 1
-    style.outline = 0    # Outline / Stroke එක සම්පූර්ණයෙන්ම ඉවත් කළා
-    style.shadow = 1.2   # සුදු පසුබිමකදී පේන්න පොඩි Shadow එකක් දැම්මා
+    style.outline = 0    # Outline සම්පූර්ණයෙන්ම අයින් කළා
+    style.shadow = 1.5   # අකුරු පේන්න Shadow එකක් දුන්නා
     style.bold = False   
     style.alignment = 2  
-    style.MarginV = 20   
+    style.MarginV = 50   # අකුරු ටිකක් උඩට ගත්තා (කලින් 20 තිබුණේ)
     subs.styles["Default"] = style
     
     # 💧 ASS Format Styling (For Watermarks - Top Center)
     wm_style = pysubs2.SSAStyle()
-    wm_style.fontname = "Noto Sans Sinhala"
-    wm_style.fontsize = 18 
+    wm_style.fontname = "Abhaya Libre"
+    wm_style.fontsize = 20 
     wm_style.primarycolor = pysubs2.Color(255, 255, 255)
     wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 255)
+    wm_style.backcolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.borderstyle = 1
     wm_style.outline = 0
-    wm_style.shadow = 1.2
+    wm_style.shadow = 1.5
     wm_style.bold = False
     wm_style.alignment = 8 
-    wm_style.MarginV = 15
+    wm_style.MarginV = 20
     subs.styles["Watermark"] = wm_style
     
-    # 📌 Watermark Text
+    # 📌 Watermark Text (Hex #1E90FF converted to ASS format -> &HFF901E&)
     wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&HFF901E&}anishift.netlify.app"
     
-    # Start Watermark
     start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text, style="Watermark")
     subs.insert(0, start_wm)
     
-    # End Watermark
     if len(subs) > 1:
         last_time = max([e.end for e in subs if e.style == "Default"])
         end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text, style="Watermark")
@@ -248,7 +247,7 @@ def process_and_translate_subtitle(video_path):
     
     sin_sub_ass = "hardsub_temp.ass"
     subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created with PERFECT Rendering!")
+    print("✅ Sinhala .ASS Subtitle File Created with NEW Font & Position!")
     return sin_sub_ass
 
 # --- 4. HARDSUB (BURN-IN) PROCESS ---
@@ -258,7 +257,6 @@ def burn_subtitles_to_video(video_path, sub_ass_path):
     output_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_Hardsubbed.mkv"
     hardsubbed_video_path = os.path.join(OUTPUT_DIR, output_filename)
     
-    # System font එක පාවිච්චි කරන නිසා fontsdir parameter එක අයින් කළා
     cmd = [
         'ffmpeg', '-i', video_path, 
         '-vf', f"subtitles={sub_ass_path}", 
