@@ -6,6 +6,7 @@ import requests
 import subprocess
 import glob
 import re
+import shutil
 import concurrent.futures
 import firebase_admin
 from firebase_admin import credentials, firestore, db
@@ -116,25 +117,18 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. SETUP NEW SINHALA FONT (Abhaya Libre) ---
+# --- 2. SETUP CUSTOM LOCAL FONT ---
 def setup_system_font():
-    print("🔤 Setting up New Sinhala Font (Abhaya Libre) for perfect rendering...")
+    print("🔤 Setting up Custom Local Fonts (0KDNAMAL)...")
     font_dir = os.path.expanduser("~/.local/share/fonts")
     os.makedirs(font_dir, exist_ok=True)
-    font_path = os.path.join(font_dir, "AbhayaLibre-SemiBold.ttf")
     
-    if not os.path.exists(font_path):
-        # Abhaya Libre කියන්නේ ඔයාගේ Screenshot එකට ගොඩක් සමාන ලස්සන Font එකක්
-        font_url = "https://raw.githubusercontent.com/mooniak/abhaya-libre-font/master/fonts/ttf/AbhayaLibre-SemiBold.ttf"
-        try:
-            r = requests.get(font_url, timeout=15)
-            if r.status_code == 200:
-                with open(font_path, "wb") as f:
-                    f.write(r.content)
-        except Exception as e:
-            print(f"⚠️ Font Download Error: {e}")
+    # GitHub Repo එකේ තියෙන 'fonts' ෆෝල්ඩර් එකෙන් ෆයිල්ස් කොපි කිරීම
+    if os.path.exists("fonts"):
+        for font_file in glob.glob("fonts/*.ttf"):
+            shutil.copy(font_file, font_dir)
+            print(f"✅ Installed font: {os.path.basename(font_file)}")
             
-    # Update system font cache
     subprocess.run(['fc-cache', '-f', '-v'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # --- 3. EXTRACT, TRANSLATE & CREATE .ASS FILE ---
@@ -204,37 +198,38 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
     
-    # 🎨 ASS Format Styling
+    # 🎨 ASS Format Styling (0KDNAMAL + No Stroke + Moved Up)
     style = pysubs2.SSAStyle()
-    style.fontname = "Abhaya Libre"  # අලුත් Font එක
-    style.fontsize = 24  
+    style.fontname = "0KDNAMAL"  # ඔයා දුන්න Font එකේ නම
+    style.fontsize = 28  
     style.primarycolor = pysubs2.Color(255, 255, 255)
-    style.outlinecolor = pysubs2.Color(0, 0, 0, 255)  
-    style.backcolor = pysubs2.Color(0, 0, 0, 0) # Black Shadow Color
+    style.outlinecolor = pysubs2.Color(0, 0, 0, 0)  
+    style.backcolor = pysubs2.Color(0, 0, 0, 0)
     style.borderstyle = 1
-    style.outline = 0    # Outline සම්පූර්ණයෙන්ම අයින් කළා
-    style.shadow = 1.5   # අකුරු පේන්න Shadow එකක් දුන්නා
+    
+    style.outline = 0    # Stroke/Outline ඉවත් කළා
+    style.shadow = 1.0   # පේන්න පොඩි Shadow එකක්
     style.bold = False   
     style.alignment = 2  
-    style.MarginV = 50   # අකුරු ටිකක් උඩට ගත්තා (කලින් 20 තිබුණේ)
+    style.MarginV = 65   # අකුරු ටිකක් උඩට ගත්තා
     subs.styles["Default"] = style
     
     # 💧 ASS Format Styling (For Watermarks - Top Center)
     wm_style = pysubs2.SSAStyle()
-    wm_style.fontname = "Abhaya Libre"
-    wm_style.fontsize = 20 
+    wm_style.fontname = "0KDNAMAL"
+    wm_style.fontsize = 24 
     wm_style.primarycolor = pysubs2.Color(255, 255, 255)
-    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 255)
+    wm_style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.backcolor = pysubs2.Color(0, 0, 0, 0)
     wm_style.borderstyle = 1
     wm_style.outline = 0
-    wm_style.shadow = 1.5
+    wm_style.shadow = 1.0
     wm_style.bold = False
     wm_style.alignment = 8 
     wm_style.MarginV = 20
     subs.styles["Watermark"] = wm_style
     
-    # 📌 Watermark Text (Hex #1E90FF converted to ASS format -> &HFF901E&)
+    # 📌 Watermark Text (#1E90FF -> &HFF901E&)
     wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\\Nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\\N{\\c&HFF901E&}anishift.netlify.app"
     
     start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text, style="Watermark")
@@ -247,7 +242,7 @@ def process_and_translate_subtitle(video_path):
     
     sin_sub_ass = "hardsub_temp.ass"
     subs.save(sin_sub_ass, encoding="utf-8")
-    print("✅ Sinhala .ASS Subtitle File Created with NEW Font & Position!")
+    print("✅ Sinhala .ASS Subtitle File Created with Custom 0KDNAMAL Font!")
     return sin_sub_ass
 
 # --- 4. HARDSUB (BURN-IN) PROCESS ---
