@@ -180,47 +180,48 @@ def get_abyss_token():
         return res.get("token")
     except: return None
 
+
 # ==========================================
-# 🛑 FULLY FIXED ABYSS FOLDER MOVE API 🛑
+# 🛑 ULTIMATE ABYSS FOLDER MOVE API 🛑
 # ==========================================
 def move_video_to_folder(file_id, folder_id, token):
     print(f"\n[DEBUG] 📦 Moving video {file_id} to Folder {folder_id}...")
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    url = f"https://api.abyss.to/v1/files/{file_id}" # API Document එකේ තියෙන PUT/PATCH File Endpoint එක
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"https://api.abyss.to/v1/files/{file_id}"
     
-    # අපි එකින් එක Payload යවලා ටෙස්ට් කරමු API එක අවුල් නොයන්න.
-    keys_to_test = ["folderId", "parentId", "folder_id"]
+    # Abyss API එකට යවන්න පුළුවන් හැම ක්‍රමයක්ම අපි මෙතන ලිස්ට් කරනවා.
+    # 1. JSON විදිහට යැවීම
+    # 2. Query Params (?folderId=...) විදිහට යැවීම
+    methods = [
+        ("PUT", {"json": {"folderId": folder_id}}),
+        ("PUT", {"json": {"parentId": folder_id}}),
+        ("PATCH", {"params": {"folderId": folder_id}}),
+        ("PATCH", {"params": {"parentId": folder_id}}),
+        ("PUT", {"params": {"folderId": folder_id}})
+    ]
     
-    for key in keys_to_test:
-        payload = {key: folder_id}
-        print(f"[DEBUG] ▶️ Sending PUT Request with Payload: {payload}")
+    for req_type, kwargs in methods:
+        print(f"[DEBUG] ▶️ Trying {req_type} Request with {kwargs}")
         try:
-            resp = requests.put(url, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 200:
-                print(f"[DEBUG] ◀️ Response 200 OK. Verifying if it actually moved...")
-                
-                # 🛑 VERIFICATION: File එක ඇත්තටම Move වෙලාද බලනවා (GET Request)[cite: 4]
-                verify_resp = requests.get(url, headers=headers, timeout=10)
-                if verify_resp.status_code == 200:
-                    file_data = verify_resp.json()
-                    data_obj = file_data.get("data", file_data)
-                    
-                    current_folder = data_obj.get("folderId") or data_obj.get("folder_id") or data_obj.get("parentId")
-                    if str(current_folder) == str(folder_id):
-                        print(f"✅ SUCCESS! Video verified inside folder '{folder_id}' using key '{key}'.")
-                        return
-                    else:
-                        print(f"⚠️ API returned 200 but file is still NOT in the folder. Moving to next key...")
-                else:
-                    print("✅ Video moved (Verification skipped due to GET error).")
-                    return
+            if req_type == "PUT":
+                resp = requests.put(url, headers=headers, timeout=30, **kwargs)
             else:
-                print(f"⚠️ Failed with {key}. Status: {resp.status_code}")
-        except Exception as e: print(f"[DEBUG] Request Error: {e}")
-        time.sleep(2)
+                resp = requests.patch(url, headers=headers, timeout=30, **kwargs)
+                
+            # මෙන්න මේකෙන් තමයි ඇත්තම Error එක මොකක්ද කියලා අපි අල්ලගන්නේ!
+            print(f"[DEBUG] ◀️ Status: {resp.status_code} | Reply from Abyss: {resp.text}")
+            
+            if resp.status_code == 200:
+                print("✅ SUCCESS: Video moved to folder perfectly!")
+                return # වැඩේ හරි නම් ඊළඟ ඒවා ට්‍රයි කරන්නේ නෑ, නවත්තනවා.
+                
+        except Exception as e: 
+            print(f"[DEBUG] Request Error: {e}")
+        time.sleep(2) # API එක බ්ලොක් නොවෙන්න තත්පර 2ක් ඉන්නවා
         
-    print("❌ FAILED TO MOVE FOLDER AFTER ALL ATTEMPTS! PLEASE CHECK LOGS.")
+    print("❌ FAILED TO MOVE FOLDER AFTER ALL ATTEMPTS! (Check the Abyss Replies above)")
 # ==========================================
+
 
 def upload_video_to_abyss(video_path, folder_id):
     print("☁️ Uploading Original Video to Abyss.to...")
@@ -230,9 +231,10 @@ def upload_video_to_abyss(video_path, folder_id):
     for attempt in range(3):
         try:
             fields = {'file': (upload_filename, open(video_path, 'rb'), mime_type)}
-            # Upload කරද්දිත් අපි යවන්නේ එක Key එකක් විතරයි!
             if folder_id: 
                 fields['folderId'] = str(folder_id) 
+                fields['folder_id'] = str(folder_id)
+                fields['parentId'] = str(folder_id)
 
             multipart_data = MultipartEncoder(fields=fields)
             headers = {'Content-Type': multipart_data.content_type, 'User-Agent': 'Mozilla/5.0'}
