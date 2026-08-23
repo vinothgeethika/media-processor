@@ -41,7 +41,9 @@ if not firebase_admin._apps:
 fs_db = firestore.client()
 
 # --- ⚙️ ABYSS.TO API SETTINGS ---
-ABYSS_API_KEY = "19136c9e1c8d2cac4e0e8b612008050a"
+ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "19136c9e1c8d2cac4e0e8b612008050a")
+ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")
+ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "")
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
@@ -52,7 +54,7 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: API SUBTITLE (No Re-encode)")
+print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: API SOFTSUB (Premium)")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -114,7 +116,7 @@ def download_video():
                 return os.path.join(root, f)
     return None
 
-# --- 2. EXTRACT & TRANSLATE SUBTITLE TO SRT ---
+# --- 2. EXTRACT & TRANSLATE SUBTITLE (TO .SRT) ---
 def clean_vtt_tags(text):
     if not text: return ""
     t = str(text)
@@ -181,7 +183,7 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
             
-    # 📌 Watermark Text (SRT වලට HTML Tags පාවිච්චි කරනවා)
+    # 📌 Watermark Text - HTML format (SRT වල වැඩ කරන විදිහට)
     wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\n<font color=\"#1E90FF\">anishift.netlify.app</font>"
     
     start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text)
@@ -192,15 +194,15 @@ def process_and_translate_subtitle(video_path):
         end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text)
         subs.append(end_wm)
 
-    # Save as standard SRT file
-    sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala.srt")
+    # සබ්ටයිටල් එක .SRT විදිහට සේව් කරනවා API එකට යවන්න ලේසි වෙන්න
+    sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
     subs.save(sin_sub_srt, encoding="utf-8")
-    print("✅ Sinhala .SRT Subtitle File Created!")
+    print("✅ Sinhala .SRT Subtitle File Created Successfully!")
     return sin_sub_srt
 
 # --- 3. UPLOAD RAW VIDEO TO ABYSS.TO ---
 def upload_video_to_abyss(video_path):
-    print("☁️ Uploading RAW Video to Abyss.to...")
+    print("☁️ Uploading Original Video to Abyss.to...")
     upload_filename = os.path.basename(video_path)
     mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
 
@@ -234,17 +236,37 @@ def upload_video_to_abyss(video_path):
                 
     return None, 0
 
-# --- 4. UPLOAD SUBTITLE TO ABYSS API (BINARY METHOD) ---
-def upload_subtitle_to_abyss_api(vhd_code, srt_path):
-    print(f"☁️ Uploading Subtitle directly to Abyss API for {vhd_code}...")
+# --- 4. UPLOAD SUBTITLE TO ABYSS API (JWT AUTH) ---
+def get_abyss_token():
+    print("🔑 Authenticating with Abyss to get JWT Token...")
+    if not ABYSS_EMAIL or not ABYSS_PASSWORD:
+        print("⚠️ ABYSS_EMAIL or ABYSS_PASSWORD not found in environment variables!")
+        return None
+        
+    login_url = "https://api.abyss.to/auth/login"
+    login_payload = {"email": ABYSS_EMAIL, "password": ABYSS_PASSWORD}
+    
     try:
-        # Document එකේ තියෙන විදිහටම API එකට යවනවා
+        login_resp = requests.post(login_url, json=login_payload).json()
+        token = login_resp.get("token")
+        if token:
+            print("✅ JWT Token Retrieved Successfully!")
+            return token
+        else:
+            print(f"❌ Login Failed: {login_resp}")
+    except Exception as e:
+        print(f"⚠️ Auth Error: {e}")
+    return None
+
+def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
+    print(f"☁️ Uploading Sinhala Subtitle to {vhd_code}...")
+    try:
         url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
         
         headers = {
-            "Authorization": f"Bearer {ABYSS_API_KEY}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/octet-stream",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            "User-Agent": "Mozilla/5.0"
         }
         
         with open(srt_path, "rb") as f:
@@ -252,14 +274,13 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path):
             
         resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
         
-        print(f"📥 Abyss Subtitle API Response [{resp.status_code}]: {resp.text}")
         if resp.status_code == 200:
-            print("✅ Subtitle Attached Successfully via API!")
+            print("🎉 Subtitle Attached Successfully via Abyss API!")
         else:
-            print(f"❌ Failed to attach subtitle. Code: {resp.status_code}")
+            print(f"❌ Failed to attach subtitle. HTTP {resp.status_code}: {resp.text}")
             
     except Exception as e:
-        print(f"⚠️ Subtitle API Error: {e}")
+        print(f"⚠️ Subtitle API Upload Error: {e}")
 
 # --- 5. UPDATE DATABASE ---
 def update_database(file_code):
@@ -285,9 +306,11 @@ if original_video:
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # වීඩියෝ එක Upload වුණාට පස්සේ සබ්ටයිටල් එක API එකෙන් යවනවා
+        # 1. Get Token, 2. Upload Subtitle
         if srt_sub_path and os.path.exists(srt_sub_path):
-            upload_subtitle_to_abyss_api(file_code, srt_sub_path)
+            jwt_token = get_abyss_token()
+            if jwt_token:
+                upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
             
         update_database(file_code)
         notify_status("success", file_size)
