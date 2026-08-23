@@ -20,8 +20,7 @@ except ImportError:
     SPOKEN_DICT = {}
 
 def apply_spoken_sinhala(text):
-    if not text or not SPOKEN_DICT: 
-        return text
+    if not text or not SPOKEN_DICT: return text
     sorted_keys = sorted(SPOKEN_DICT.keys(), key=len, reverse=True)
     result_text = str(text)
     for key in sorted_keys:
@@ -35,18 +34,8 @@ cred = credentials.Certificate("serviceAccountKey.json")
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://anishift-5d14b-default-rtdb.firebaseio.com")
 
 if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': FIREBASE_DB_URL
-    })
+    firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DB_URL})
 fs_db = firestore.client()
-
-# =========================================================
-# ⚠️ BOT 2 (Long Anime) එකට දානවා නම් පහළ තියෙන ටික වෙනස් කරන්න ⚠️
-# 1. ABYSS_API_KEY -> ABYSS_API_KEY_LONG
-# 2. ABYSS_EMAIL -> ABYSS_EMAIL_LONG
-# 3. ABYSS_PASSWORD -> ABYSS_PASSWORD_LONG
-# 4. worker_job_status_short -> worker_job_status_long
-# =========================================================
 
 ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
 ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")
@@ -63,10 +52,11 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-# ෆෝල්ඩර් නමට ගැලපෙන විදිහට නම සුද්ද කිරීම
-safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
+# ⭐ Master Bot එවපු FOLDER ID එක මෙතනින් ගන්නවා! ⭐
+folder_id = payload.get("folder_id") 
 
-print(f"🚀 [WORKER STARTED] Anime: {safe_anime_title} | Ep: {ep_num} | Mode: API SOFTSUB + AUTO FOLDERS")
+safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
+print(f"🚀 [WORKER STARTED] Anime: {safe_anime_title} | Ep: {ep_num} | Folder ID: {folder_id}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -76,14 +66,11 @@ os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 def notify_status(status="failed", file_size=0):
     try:
         db.reference(RTDB_WORKER_FEEDBACK).set({
-            "status": status,
-            "anilist_id": str(anime_id),
-            "episode": int(ep_num),
-            "file_size": file_size,
+            "status": status, "anilist_id": str(anime_id),
+            "episode": int(ep_num), "file_size": file_size,
             "timestamp": time.time()
         })
-    except Exception as e:
-        print(f"⚠️ Failed to write RTDB feedback: {e}")
+    except: pass
 
 def extract_ep_number(filename):
     clean = re.sub(r'\[.*?\]|\(.*?\)', ' ', filename.lower())
@@ -98,7 +85,6 @@ def extract_ep_number(filename):
     if m: return int(m.group(1))
     return None
 
-# --- 1. DOWNLOADING VIDEO ---
 def download_video():
     print(f"📥 Starting Download...")
     if search_type == "BATCH":
@@ -124,11 +110,9 @@ def download_video():
                 return os.path.join(root, f)
     for root, dirs, files in os.walk(BASE_DIR):
         for f in files:
-            if f.endswith(('.mkv', '.mp4')):
-                return os.path.join(root, f)
+            if f.endswith(('.mkv', '.mp4')): return os.path.join(root, f)
     return None
 
-# --- 2. EXTRACT & TRANSLATE SUBTITLE ---
 def clean_vtt_tags(text):
     if not text: return ""
     t = str(text)
@@ -139,10 +123,7 @@ def process_and_translate_subtitle(video_path):
     print("📝 Extracting Embedded Subtitle from Video...")
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
     subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
-    
-    if not os.path.exists(eng_sub) or os.path.getsize(eng_sub) < 100:
-        print("❌ Video has no embedded subtitle!")
-        return None
+    if not os.path.exists(eng_sub) or os.path.getsize(eng_sub) < 100: return None
 
     print("⚡ Translating Extracted Subtitle to Sinhala...")
     try: subs = pysubs2.load(eng_sub)
@@ -163,8 +144,7 @@ def process_and_translate_subtitle(video_path):
 
     def safe_translate_batch(batch_chunk):
         translator = GoogleTranslator(source='auto', target='si')
-        batch_res = {}
-        failed_lines = []
+        batch_res, failed_lines = {}, []
         try:
             res = translator.translate_batch(batch_chunk)
             for orig, trans in zip(batch_chunk, res):
@@ -185,69 +165,36 @@ def process_and_translate_subtitle(video_path):
             e.text = str(translation_map.get(cl, cl))
             
     wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\n<font color=\"#1E90FF\">anishift.netlify.app</font>"
-    start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text)
-    subs.insert(0, start_wm)
-    
+    subs.insert(0, pysubs2.SSAEvent(start=5000, end=15000, text=wm_text))
     if len(subs) > 1:
         last_time = max([e.end for e in subs if e.text != wm_text])
-        end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text)
-        subs.append(end_wm)
+        subs.append(pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text))
 
     sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
     subs.save(sin_sub_srt, encoding="utf-8")
-    print("✅ Sinhala .SRT Subtitle File Created Successfully!")
     return sin_sub_srt
 
-# --- 3. FOLDER CREATION & FILE MANAGEMENT (NEW) ---
 def get_abyss_token():
     print("🔑 Authenticating with Abyss to get JWT Token...")
-    if not ABYSS_EMAIL or not ABYSS_PASSWORD:
-        print("⚠️ Abyss credentials not found in env!")
-        return None
+    if not ABYSS_EMAIL or not ABYSS_PASSWORD: return None
     try:
-        login_resp = requests.post("https://api.abyss.to/auth/login", json={"email": ABYSS_EMAIL, "password": ABYSS_PASSWORD}).json()
-        token = login_resp.get("token")
-        if token: return token
-    except Exception as e: print(f"⚠️ Auth Error: {e}")
-    return None
-
-def get_or_create_folder(folder_name, token):
-    print(f"📁 Checking folder for: {folder_name}...")
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    
-    # 1. Search if folder already exists
-    try:
-        list_resp = requests.get("https://api.abyss.to/v1/folders/list", headers=headers, timeout=30).json()
-        folders = list_resp.get("data", []) if isinstance(list_resp.get("data"), list) else list_resp
-        if isinstance(folders, list):
-            for f in folders:
-                if f.get("name", "").lower() == folder_name.lower():
-                    print(f"✅ Found existing folder! ID: {f.get('id')}")
-                    return f.get("id")
-    except Exception as e: print(f"⚠️ Error fetching folders: {e}")
-
-    # 2. Create new folder if not found
-    print(f"➕ Folder not found. Creating new folder...")
-    try:
-        create_resp = requests.post("https://api.abyss.to/v1/folders", headers=headers, json={"name": folder_name}, timeout=30).json()
-        folder_id = create_resp.get("data", {}).get("id") or create_resp.get("id")
-        if folder_id:
-            print(f"✅ Folder created! ID: {folder_id}")
-            return folder_id
-    except Exception as e: print(f"⚠️ Error creating folder: {e}")
-    return None
+        res = requests.post("https://api.abyss.to/auth/login", json={"email": ABYSS_EMAIL, "password": ABYSS_PASSWORD}).json()
+        return res.get("token")
+    except: return None
 
 def move_video_to_folder(file_id, folder_id, token):
-    print(f"📦 Moving video to Anime folder...")
+    print(f"📦 Moving video to Folder {folder_id}...")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"https://api.abyss.to/v1/files/{file_id}?folderId={folder_id}" # API Docs වලට අනුව Query Parameter එක
     try:
-        resp = requests.put(f"https://api.abyss.to/v1/files/{file_id}", headers=headers, json={"folderId": folder_id}, timeout=30)
-        if resp.status_code == 200: print("✅ Video moved to folder successfully!")
-        else: print(f"⚠️ Failed to move video. Status: {resp.status_code}")
+        resp = requests.patch(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            resp = requests.put(url, headers=headers, json={"folderId": folder_id}, timeout=30)
+        if resp.status_code == 200: print("✅ Video moved successfully!")
+        else: print(f"⚠️ Move Failed. Status: {resp.status_code}")
     except Exception as e: print(f"⚠️ Error moving video: {e}")
 
-# --- 4. UPLOAD VIDEO ---
-def upload_video_to_abyss(video_path, folder_id=None):
+def upload_video_to_abyss(video_path, folder_id):
     print("☁️ Uploading Original Video to Abyss.to...")
     upload_filename = os.path.basename(video_path)
     mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
@@ -255,8 +202,7 @@ def upload_video_to_abyss(video_path, folder_id=None):
     for attempt in range(3):
         try:
             fields = {'file': (upload_filename, open(video_path, 'rb'), mime_type)}
-            if folder_id: fields['folderId'] = str(folder_id) # Uploading directly to folder if possible
-            
+            if folder_id: fields['folderId'] = str(folder_id) 
             multipart_data = MultipartEncoder(fields=fields)
             headers = {'Content-Type': multipart_data.content_type, 'User-Agent': 'Mozilla/5.0'}
 
@@ -268,13 +214,11 @@ def upload_video_to_abyss(video_path, folder_id=None):
 
             if resp_data.get("status") is True or str(resp_data.get("status")) == "200":
                 vhd_code = resp_data.get("slug") or resp_data.get("id") or resp_data.get("code")
-                if vhd_code:
-                    return vhd_code, os.path.getsize(video_path)
-        except Exception as e:
+                if vhd_code: return vhd_code, os.path.getsize(video_path)
+        except:
             if attempt < 2: time.sleep(15)
     return None, 0
 
-# --- 5. UPLOAD SUBTITLE ---
 def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     print(f"☁️ Uploading Sinhala Subtitle...")
     try:
@@ -283,19 +227,14 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
         with open(srt_path, "rb") as f: sub_data = f.read()
         resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
         if resp.status_code == 200: print("🎉 Subtitle Attached Successfully!")
-        else: print(f"❌ Subtitle upload failed. HTTP {resp.status_code}")
-    except Exception as e: print(f"⚠️ Subtitle API Error: {e}")
+    except: pass
 
-# --- 6. UPDATE DATABASE ---
 def update_database(file_code):
     print("💾 Updating Firestore...")
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
     fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set({
         'status': 'uploaded',
-        'links': {
-            'abyss_video_id': file_code,
-            'abyss_embed': f"https://abyss.to/embed/{file_code}"
-        },
+        'links': {'abyss_video_id': file_code, 'abyss_embed': f"https://abyss.to/embed/{file_code}"},
         'last_updated': firestore.SERVER_TIMESTAMP
     }, merge=True)
 
@@ -304,24 +243,16 @@ original_video = download_video()
 
 if original_video:
     srt_sub_path = process_and_translate_subtitle(original_video)
-    
-    # 1. Get Token and Folder ID first
     jwt_token = get_abyss_token()
-    folder_id = None
-    if jwt_token:
-        folder_id = get_or_create_folder(safe_anime_title, jwt_token)
     
-    # 2. Upload Video
     upload_result = upload_video_to_abyss(original_video, folder_id)
-    
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # 3. Double-check move (If folderId wasn't supported during upload form-data)
+        # Payload එකෙන් ආපු folder_id එකට කෙලින්ම Move කිරීම
         if jwt_token and folder_id:
             move_video_to_folder(file_code, folder_id, jwt_token)
         
-        # 4. Upload Subtitle
         if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
             upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
             
