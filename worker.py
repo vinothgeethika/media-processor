@@ -10,7 +10,7 @@ import concurrent.futures
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
-from deep_translator import GoogleTranslator, LingvaTranslator
+from deep_translator import GoogleTranslator
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 
@@ -182,7 +182,7 @@ def process_and_translate_subtitle(video_path):
         print("❌ Could not extract or generate english subtitle. Skipping translation.")
         return None
 
-    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම (Fallback ක්‍රමය)
+    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම (Smart Progressive Fallback)
     print("⚡ Translating English Subtitle to Sinhala...")
     try: subs = pysubs2.load(eng_sub)
     except: return None
@@ -191,22 +191,14 @@ def process_and_translate_subtitle(video_path):
     translation_map = {}
     
     def translate_single_line(text):
-        # 1. මුලින්ම Google එකෙන් ට්‍රයි කරනවා (පාරවල් 3යි)
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 res = GoogleTranslator(source='auto', target='si').translate(text)
                 if res and "Error 500" not in str(res): return apply_spoken_sinhala(res)
             except: 
-                time.sleep(1.5)
-                
-        # 2. Google බ්ලොක් කළොත් Lingva (Proxy Network) එකෙන් ට්‍රයි කරනවා
-        try:
-            res_lingva = LingvaTranslator(source='auto', target='si').translate(text)
-            if res_lingva: return apply_spoken_sinhala(res_lingva)
-        except:
-            pass
-            
-        return text # ඔක්කොම ෆේල් වුණොත් විතරක් ඉංග්‍රීසියෙන් තියයි
+                # Block වුණොත් වෙලාව ටික ටික වැඩි කරනවා (2s, 4s, 6s, 8s, 10s)
+                time.sleep(2 + (attempt * 2)) 
+        return text
 
     def safe_translate_batch(batch_chunk):
         batch_res, failed_lines = {}, []
@@ -219,7 +211,7 @@ def process_and_translate_subtitle(video_path):
         except: 
             failed_lines = list(batch_chunk)
         
-        # බ්ලොක් වෙච්ච ටික (failed_lines) අර Fallback ෆන්ක්ෂන් එකට යවනවා
+        # බ්ලොක් වෙච්ච ටික (failed_lines) single line වලට යවනවා
         for f_line in failed_lines: 
             batch_res[f_line] = translate_single_line(f_line)
         return batch_res
@@ -227,7 +219,7 @@ def process_and_translate_subtitle(video_path):
     # කෑලි 10 ගානේ කඩනවා
     chunks = [unique_texts[i:i+10] for i in range(0, len(unique_texts), 10)]
     
-    # Workers ගාණ 2කට අඩු කළා 
+    # Workers ගාණ 2කට අඩු කළා (IP Block වීම අඩු කරන්න)
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(safe_translate_batch, chunk) for chunk in chunks]
         for future in concurrent.futures.as_completed(futures): 
