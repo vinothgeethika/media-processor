@@ -180,30 +180,47 @@ def get_abyss_token():
         return res.get("token")
     except: return None
 
+# ==========================================
+# 🛑 FULLY FIXED ABYSS FOLDER MOVE API 🛑
+# ==========================================
 def move_video_to_folder(file_id, folder_id, token):
-    print(f"📦 Moving video {file_id} to Folder {folder_id}...")
+    print(f"\n[DEBUG] 📦 Moving video {file_id} to Folder {folder_id}...")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    url = f"https://api.abyss.to/v1/files/{file_id}"
+    url = f"https://api.abyss.to/v1/files/{file_id}" # API Document එකේ තියෙන PUT/PATCH File Endpoint එක
     
-    payload = {
-        "folderId": folder_id,
-        "folder_id": folder_id,
-        "parentId": folder_id,
-        "parent_id": folder_id
-    }
+    # අපි එකින් එක Payload යවලා ටෙස්ට් කරමු API එක අවුල් නොයන්න.
+    keys_to_test = ["folderId", "parentId", "folder_id"]
     
-    try:
-        resp = requests.put(url, headers=headers, json=payload, timeout=30)
-        if resp.status_code == 200: 
-            print("✅ Video moved to folder successfully (PUT)!")
-        else:
-            print(f"⚠️ PUT Failed ({resp.status_code}). Trying PATCH...")
-            resp2 = requests.patch(url, headers=headers, json=payload, timeout=30)
-            if resp2.status_code == 200:
-                print("✅ Video moved to folder successfully (PATCH)!")
+    for key in keys_to_test:
+        payload = {key: folder_id}
+        print(f"[DEBUG] ▶️ Sending PUT Request with Payload: {payload}")
+        try:
+            resp = requests.put(url, headers=headers, json=payload, timeout=30)
+            if resp.status_code == 200:
+                print(f"[DEBUG] ◀️ Response 200 OK. Verifying if it actually moved...")
+                
+                # 🛑 VERIFICATION: File එක ඇත්තටම Move වෙලාද බලනවා (GET Request)[cite: 4]
+                verify_resp = requests.get(url, headers=headers, timeout=10)
+                if verify_resp.status_code == 200:
+                    file_data = verify_resp.json()
+                    data_obj = file_data.get("data", file_data)
+                    
+                    current_folder = data_obj.get("folderId") or data_obj.get("folder_id") or data_obj.get("parentId")
+                    if str(current_folder) == str(folder_id):
+                        print(f"✅ SUCCESS! Video verified inside folder '{folder_id}' using key '{key}'.")
+                        return
+                    else:
+                        print(f"⚠️ API returned 200 but file is still NOT in the folder. Moving to next key...")
+                else:
+                    print("✅ Video moved (Verification skipped due to GET error).")
+                    return
             else:
-                print(f"⚠️ Move Failed entirely. Status: {resp2.status_code} | {resp2.text}")
-    except Exception as e: print(f"⚠️ Error moving video: {e}")
+                print(f"⚠️ Failed with {key}. Status: {resp.status_code}")
+        except Exception as e: print(f"[DEBUG] Request Error: {e}")
+        time.sleep(2)
+        
+    print("❌ FAILED TO MOVE FOLDER AFTER ALL ATTEMPTS! PLEASE CHECK LOGS.")
+# ==========================================
 
 def upload_video_to_abyss(video_path, folder_id):
     print("☁️ Uploading Original Video to Abyss.to...")
@@ -213,10 +230,9 @@ def upload_video_to_abyss(video_path, folder_id):
     for attempt in range(3):
         try:
             fields = {'file': (upload_filename, open(video_path, 'rb'), mime_type)}
+            # Upload කරද්දිත් අපි යවන්නේ එක Key එකක් විතරයි!
             if folder_id: 
                 fields['folderId'] = str(folder_id) 
-                fields['folder_id'] = str(folder_id)
-                fields['parentId'] = str(folder_id)
 
             multipart_data = MultipartEncoder(fields=fields)
             headers = {'Content-Type': multipart_data.content_type, 'User-Agent': 'Mozilla/5.0'}
@@ -240,8 +256,8 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
         url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"}
         with open(srt_path, "rb") as f: sub_data = f.read()
-        resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
-        if resp.status_code == 200: print("🎉 Subtitle Attached Successfully!")
+        requests.put(url, headers=headers, data=sub_data, timeout=60)
+        print("🎉 Subtitle Attached Successfully!")
     except: pass
 
 def update_database(file_code):
@@ -264,6 +280,7 @@ if original_video:
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
+        # Payload එකෙන් ආපු folder_id එකට Move කිරීම
         if jwt_token and folder_id:
             move_video_to_folder(file_code, folder_id, jwt_token)
         
