@@ -26,6 +26,14 @@ jobs:
         run: |
           pip install requests firebase-admin pysubs2 deep-translator requests-toolbelt torrentool beautifulsoup4 python-dotenv faster-whisper
 
+      # ⭐ මෙන්න මේක තමයි කලින් මිස් වුණේ (Firebase JSON එක හදන ස්ටෙප් එක)
+      - name: Create Firebase Service Account JSON
+        env: 
+          # ඔයාගේ Github Secrets වල තියෙන නම FIREBASE_CREDENTIALS නෙමෙයි නම්, ඒ නම මෙතනට දාන්න.
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }} 
+        run: |
+          echo "$FIREBASE_CREDENTIALS" > serviceAccountKey.json
+
       - name: Run Worker Script
         env:
           JOB_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
