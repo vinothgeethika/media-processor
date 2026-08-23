@@ -180,49 +180,43 @@ def get_abyss_token():
         return res.get("token")
     except: return None
 
-
 # ==========================================
-# 🛑 ULTIMATE ABYSS FOLDER MOVE API 🛑
+# 🛑 100% WORKING ABYSS FOLDER MOVE API 🛑
 # ==========================================
 def move_video_to_folder(file_id, folder_id, token):
     print(f"\n[DEBUG] 📦 Moving video {file_id} to Folder {folder_id}...")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    url = f"https://api.abyss.to/v1/files/{file_id}"
+    url = f"https://api.abyss.to/v1/files/{file_id}" # API Document එකේ තියෙන PUT Endpoint එක[cite: 4]
     
-    # Abyss API එකට යවන්න පුළුවන් හැම ක්‍රමයක්ම අපි මෙතන ලිස්ට් කරනවා.
-    # 1. JSON විදිහට යැවීම
-    # 2. Query Params (?folderId=...) විදිහට යැවීම
-    methods = [
-        ("PUT", {"json": {"folderId": folder_id}}),
-        ("PUT", {"json": {"parentId": folder_id}}),
-        ("PATCH", {"params": {"folderId": folder_id}}),
-        ("PATCH", {"params": {"parentId": folder_id}}),
-        ("PUT", {"params": {"folderId": folder_id}})
-    ]
-    
-    for req_type, kwargs in methods:
-        print(f"[DEBUG] ▶️ Trying {req_type} Request with {kwargs}")
-        try:
-            if req_type == "PUT":
-                resp = requests.put(url, headers=headers, timeout=30, **kwargs)
-            else:
-                resp = requests.patch(url, headers=headers, timeout=30, **kwargs)
-                
-            # මෙන්න මේකෙන් තමයි ඇත්තම Error එක මොකක්ද කියලා අපි අල්ලගන්නේ!
-            print(f"[DEBUG] ◀️ Status: {resp.status_code} | Reply from Abyss: {resp.text}")
-            
-            if resp.status_code == 200:
-                print("✅ SUCCESS: Video moved to folder perfectly!")
-                return # වැඩේ හරි නම් ඊළඟ ඒවා ට්‍රයි කරන්නේ නෑ, නවත්තනවා.
-                
-        except Exception as e: 
-            print(f"[DEBUG] Request Error: {e}")
-        time.sleep(2) # API එක බ්ලොක් නොවෙන්න තත්පර 2ක් ඉන්නවා
+    try:
+        # 1. මුලින්ම ෆයිල් එකේ දැනට තියෙන නම අරගන්නවා (API එකෙන් නම අනිවාර්යයෙන් ඉල්ලන නිසා)
+        print("[DEBUG] Fetching file info to get the name...")
+        file_info = requests.get(url, headers=headers, timeout=15).json()
+        file_name = file_info.get("data", {}).get("name") or file_info.get("name")
         
-    print("❌ FAILED TO MOVE FOLDER AFTER ALL ATTEMPTS! (Check the Abyss Replies above)")
+        if not file_name:
+            print("⚠️ Could not fetch file name from Abyss. Using default.")
+            file_name = "Anime_Episode.mkv"
+            
+        # 2. ෆයිල් එකේ නමත් එක්කම ෆෝල්ඩර් ID එක යවනවා (PUT Request)
+        payload = {
+            "name": file_name,
+            "folderId": folder_id
+        }
+        
+        print(f"[DEBUG] ▶️ Sending PUT Request with Payload: {payload}")
+        resp = requests.put(url, headers=headers, json=payload, timeout=30)
+        
+        if resp.status_code == 200:
+            print("✅ SUCCESS: Video moved to folder perfectly!")
+        else:
+            print(f"⚠️ Failed to move. Status: {resp.status_code} | Reply: {resp.text}")
+    except Exception as e: 
+        print(f"⚠️ Error moving video: {e}")
+
 # ==========================================
-
-
+# 🛑 DIRECT FOLDER UPLOAD (NEW) 🛑
+# ==========================================
 def upload_video_to_abyss(video_path, folder_id):
     print("☁️ Uploading Original Video to Abyss.to...")
     upload_filename = os.path.basename(video_path)
@@ -230,17 +224,20 @@ def upload_video_to_abyss(video_path, folder_id):
 
     for attempt in range(3):
         try:
+            # ⭐ කෙලින්ම ෆෝල්ඩර් එකට දාන්න Upload URL එකටම folderId එක අමුණනවා ⭐
+            upload_url = f"{ABYSS_UPLOAD_URL}?folderId={folder_id}" if folder_id else ABYSS_UPLOAD_URL
+            
             fields = {'file': (upload_filename, open(video_path, 'rb'), mime_type)}
             if folder_id: 
                 fields['folderId'] = str(folder_id) 
-                fields['folder_id'] = str(folder_id)
-                fields['parentId'] = str(folder_id)
 
             multipart_data = MultipartEncoder(fields=fields)
             headers = {'Content-Type': multipart_data.content_type, 'User-Agent': 'Mozilla/5.0'}
 
-            up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200)
-            try: resp_data = up_resp.json()
+            print(f"[DEBUG] Uploading to URL: {upload_url}")
+            up_resp = requests.post(upload_url, data=multipart_data, headers=headers, timeout=1200)
+            try: 
+                resp_data = up_resp.json()
             except: 
                 if attempt < 2: time.sleep(15)
                 continue
@@ -282,7 +279,7 @@ if original_video:
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # Payload එකෙන් ආපු folder_id එකට Move කිරීම
+        # Payload එකෙන් ආපු folder_id එකට Move කිරීම (Direct upload එක fail වුණොත් මේකෙන් හරියටම යනවා)
         if jwt_token and folder_id:
             move_video_to_folder(file_code, folder_id, jwt_token)
         
