@@ -10,7 +10,7 @@ import concurrent.futures
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, LingvaTranslator
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 
@@ -85,8 +85,6 @@ def extract_ep_number(filename):
 
 def download_video():
     print(f"📥 Starting Download...")
-    
-    # ⭐ මෙන්න මේකයි අලුත් කෑල්ල: විනාඩි 5ක් ඇතුළත Speed 0 නම් Auto Stop වෙනවා
     timeout_arg = '--bt-stop-timeout=300'
     
     if search_type == "BATCH":
@@ -184,6 +182,7 @@ def process_and_translate_subtitle(video_path):
         print("❌ Could not extract or generate english subtitle. Skipping translation.")
         return None
 
+    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම (Fallback ක්‍රමය)
     print("⚡ Translating English Subtitle to Sinhala...")
     try: subs = pysubs2.load(eng_sub)
     except: return None
@@ -192,31 +191,47 @@ def process_and_translate_subtitle(video_path):
     translation_map = {}
     
     def translate_single_line(text):
-        translator = GoogleTranslator(source='auto', target='si')
-        for attempt in range(5):
+        # 1. මුලින්ම Google එකෙන් ට්‍රයි කරනවා (පාරවල් 3යි)
+        for attempt in range(3):
             try:
-                res = translator.translate(text)
+                res = GoogleTranslator(source='auto', target='si').translate(text)
                 if res and "Error 500" not in str(res): return apply_spoken_sinhala(res)
-            except: pass
-            time.sleep(1 + attempt)
-        return text
+            except: 
+                time.sleep(1.5)
+                
+        # 2. Google බ්ලොක් කළොත් Lingva (Proxy Network) එකෙන් ට්‍රයි කරනවා
+        try:
+            res_lingva = LingvaTranslator(source='auto', target='si').translate(text)
+            if res_lingva: return apply_spoken_sinhala(res_lingva)
+        except:
+            pass
+            
+        return text # ඔක්කොම ෆේල් වුණොත් විතරක් ඉංග්‍රීසියෙන් තියයි
 
     def safe_translate_batch(batch_chunk):
-        translator = GoogleTranslator(source='auto', target='si')
         batch_res, failed_lines = {}, []
         try:
-            res = translator.translate_batch(batch_chunk)
+            time.sleep(1.5) # සැක නොහිතෙන්න පොඩි ඩිලේ එකක්
+            res = GoogleTranslator(source='auto', target='si').translate_batch(batch_chunk)
             for orig, trans in zip(batch_chunk, res):
                 if "Error 500" in str(trans): failed_lines.append(orig)
                 else: batch_res[orig] = apply_spoken_sinhala(trans)
-        except: failed_lines = list(batch_chunk)
-        for f_line in failed_lines: batch_res[f_line] = translate_single_line(f_line)
+        except: 
+            failed_lines = list(batch_chunk)
+        
+        # බ්ලොක් වෙච්ච ටික (failed_lines) අර Fallback ෆන්ක්ෂන් එකට යවනවා
+        for f_line in failed_lines: 
+            batch_res[f_line] = translate_single_line(f_line)
         return batch_res
 
-    chunks = [unique_texts[i:i+20] for i in range(0, len(unique_texts), 20)]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # කෑලි 10 ගානේ කඩනවා
+    chunks = [unique_texts[i:i+10] for i in range(0, len(unique_texts), 10)]
+    
+    # Workers ගාණ 2කට අඩු කළා 
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(safe_translate_batch, chunk) for chunk in chunks]
-        for future in concurrent.futures.as_completed(futures): translation_map.update(future.result())
+        for future in concurrent.futures.as_completed(futures): 
+            translation_map.update(future.result())
 
     for e in subs:
         if e.text:
