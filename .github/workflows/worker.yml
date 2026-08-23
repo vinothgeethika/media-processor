@@ -30,7 +30,7 @@ jobs:
       - name: Create Firebase Service Account JSON
         env: 
           # ඔයාගේ Github Secrets වල තියෙන නම FIREBASE_CREDENTIALS නෙමෙයි නම්, ඒ නම මෙතනට දාන්න.
-          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }} 
+          FIREBASE_JSON: ${{ secrets.FIREBASE_JSON }} 
         run: |
           echo "$FIREBASE_JSON" > serviceAccountKey.json
 
