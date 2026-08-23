@@ -1,4 +1,4 @@
-name: Cloud Uploader Worker (Bot 1)
+name: Process Video Workflow
 
 on:
   repository_dispatch:
@@ -7,6 +7,7 @@ on:
 jobs:
   process_video:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -21,18 +22,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2 ffmpeg
 
-      - name: Install Python Packages
+      - name: Install Python Dependencies
         run: |
-          pip install requests firebase-admin beautifulsoup4 pysubs2 deep-translator torrentool requests-toolbelt
-
-      - name: Create Firebase Key
-        run: echo '${{ secrets.FIREBASE_JSON }}' > serviceAccountKey.json
+          pip install requests firebase-admin pysubs2 deep-translator requests-toolbelt torrentool beautifulsoup4 python-dotenv faster-whisper
 
       - name: Run Worker Script
         env:
+          JOB_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
           ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
           ABYSS_EMAIL: ${{ secrets.ABYSS_EMAIL }}
           ABYSS_PASSWORD: ${{ secrets.ABYSS_PASSWORD }}
-          JOB_PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: python worker.py
