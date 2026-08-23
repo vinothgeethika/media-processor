@@ -38,8 +38,6 @@ if not firebase_admin._apps:
 fs_db = firestore.client()
 
 ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
-ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")
-ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "")
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
 
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
@@ -51,10 +49,9 @@ magnet = payload.get("magnet")
 job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
-folder_id = payload.get("folder_id")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED] Anime: {safe_anime_title} | Ep: {ep_num} | Folder ID: {folder_id}")
+print(f"🚀 [WORKER STARTED - ROOT UPLOAD] Anime: {safe_anime_title} | Ep: {ep_num}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -172,72 +169,19 @@ def process_and_translate_subtitle(video_path):
     subs.save(sin_sub_srt, encoding="utf-8")
     return sin_sub_srt
 
-def get_abyss_token():
-    print("🔑 Authenticating with Abyss to get JWT Token...")
-    if not ABYSS_EMAIL or not ABYSS_PASSWORD: return None
-    try:
-        res = requests.post("https://api.abyss.to/auth/login", json={"email": ABYSS_EMAIL, "password": ABYSS_PASSWORD}).json()
-        return res.get("token")
-    except: return None
-
-# ==========================================
-# 🛑 100% WORKING ABYSS FOLDER MOVE API 🛑
-# ==========================================
-def move_video_to_folder(file_id, folder_id, token):
-    print(f"\n[DEBUG] 📦 Moving video {file_id} to Folder {folder_id}...")
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    url = f"https://api.abyss.to/v1/files/{file_id}" # API Document එකේ තියෙන PUT Endpoint එක[cite: 4]
-    
-    try:
-        # 1. මුලින්ම ෆයිල් එකේ දැනට තියෙන නම අරගන්නවා (API එකෙන් නම අනිවාර්යයෙන් ඉල්ලන නිසා)
-        print("[DEBUG] Fetching file info to get the name...")
-        file_info = requests.get(url, headers=headers, timeout=15).json()
-        file_name = file_info.get("data", {}).get("name") or file_info.get("name")
-        
-        if not file_name:
-            print("⚠️ Could not fetch file name from Abyss. Using default.")
-            file_name = "Anime_Episode.mkv"
-            
-        # 2. ෆයිල් එකේ නමත් එක්කම ෆෝල්ඩර් ID එක යවනවා (PUT Request)
-        payload = {
-            "name": file_name,
-            "folderId": folder_id
-        }
-        
-        print(f"[DEBUG] ▶️ Sending PUT Request with Payload: {payload}")
-        resp = requests.put(url, headers=headers, json=payload, timeout=30)
-        
-        if resp.status_code == 200:
-            print("✅ SUCCESS: Video moved to folder perfectly!")
-        else:
-            print(f"⚠️ Failed to move. Status: {resp.status_code} | Reply: {resp.text}")
-    except Exception as e: 
-        print(f"⚠️ Error moving video: {e}")
-
-# ==========================================
-# 🛑 DIRECT FOLDER UPLOAD (NEW) 🛑
-# ==========================================
-def upload_video_to_abyss(video_path, folder_id):
-    print("☁️ Uploading Original Video to Abyss.to...")
+def upload_video_to_abyss(video_path):
+    print("☁️ Uploading Original Video to Abyss.to (ROOT)...")
     upload_filename = os.path.basename(video_path)
     mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
 
     for attempt in range(3):
         try:
-            # ⭐ කෙලින්ම ෆෝල්ඩර් එකට දාන්න Upload URL එකටම folderId එක අමුණනවා ⭐
-            upload_url = f"{ABYSS_UPLOAD_URL}?folderId={folder_id}" if folder_id else ABYSS_UPLOAD_URL
-            
             fields = {'file': (upload_filename, open(video_path, 'rb'), mime_type)}
-            if folder_id: 
-                fields['folderId'] = str(folder_id) 
-
             multipart_data = MultipartEncoder(fields=fields)
             headers = {'Content-Type': multipart_data.content_type, 'User-Agent': 'Mozilla/5.0'}
 
-            print(f"[DEBUG] Uploading to URL: {upload_url}")
-            up_resp = requests.post(upload_url, data=multipart_data, headers=headers, timeout=1200)
-            try: 
-                resp_data = up_resp.json()
+            up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200)
+            try: resp_data = up_resp.json()
             except: 
                 if attempt < 2: time.sleep(15)
                 continue
@@ -249,11 +193,12 @@ def upload_video_to_abyss(video_path, folder_id):
             if attempt < 2: time.sleep(15)
     return None, 0
 
-def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
+def upload_subtitle_to_abyss_api(vhd_code, srt_path):
     print(f"☁️ Uploading Sinhala Subtitle...")
     try:
         url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"}
+        headers = {"Content-Type": "application/octet-stream"} 
+        # Uploading subtitle to root files usually doesn't require JWT, just the file code.
         with open(srt_path, "rb") as f: sub_data = f.read()
         requests.put(url, headers=headers, data=sub_data, timeout=60)
         print("🎉 Subtitle Attached Successfully!")
@@ -273,18 +218,13 @@ original_video = download_video()
 
 if original_video:
     srt_sub_path = process_and_translate_subtitle(original_video)
-    jwt_token = get_abyss_token()
     
-    upload_result = upload_video_to_abyss(original_video, folder_id)
+    upload_result = upload_video_to_abyss(original_video)
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # Payload එකෙන් ආපු folder_id එකට Move කිරීම (Direct upload එක fail වුණොත් මේකෙන් හරියටම යනවා)
-        if jwt_token and folder_id:
-            move_video_to_folder(file_code, folder_id, jwt_token)
-        
-        if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
-            upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
+        if srt_sub_path and os.path.exists(srt_sub_path):
+            upload_subtitle_to_abyss_api(file_code, srt_sub_path)
             
         update_database(file_code)
         notify_status("success", file_size)
