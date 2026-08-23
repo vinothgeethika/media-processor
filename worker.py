@@ -129,14 +129,12 @@ def get_best_subtitle_stream(video_path):
         streams = json.loads(result.stdout).get('streams', [])
         if not streams: return None
         
-        # ඉංග්‍රීසි එකක් තියෙනවද බලනවා
         for s in streams:
             lang = s.get('tags', {}).get('language', '').lower()
             if lang in ['eng', 'en', 'english']:
                 print(f"✅ Found English subtitle at stream index {s['index']}")
                 return s['index']
                 
-        # නැත්තම් තියෙන පළවෙනි එක ගන්නවා
         print(f"⚠️ English not found. Taking default subtitle stream index {streams[0]['index']}")
         return streams[0]['index']
     except:
@@ -164,7 +162,6 @@ def process_and_translate_subtitle(video_path):
         
         if os.path.exists(audio_path):
             try:
-                # "base" මොඩල් එක පාවිච්චි කරනවා CPU එකට ලේසි වෙන්න (Time Out නොවෙන්න)
                 model = WhisperModel("base", device="cpu", compute_type="int8")
                 segments, info = model.transcribe(audio_path, task="translate")
                 
@@ -224,13 +221,8 @@ def process_and_translate_subtitle(video_path):
         if e.text:
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
-            
-    wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\n<font color=\"#1E90FF\">anishift.netlify.app</font>"
-    subs.insert(0, pysubs2.SSAEvent(start=5000, end=15000, text=wm_text))
-    if len(subs) > 1:
-        last_time = max([e.end for e in subs if e.text != wm_text])
-        subs.append(pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text))
 
+    # Watermark අයින් කරලා කෙලින්ම සේව් කරනවා
     sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
     subs.save(sin_sub_srt, encoding="utf-8")
     return sin_sub_srt
