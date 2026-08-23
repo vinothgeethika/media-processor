@@ -38,6 +38,8 @@ if not firebase_admin._apps:
 fs_db = firestore.client()
 
 ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
+ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")       # ⭐ ආයෙත් මේ දෙක ගත්තා
+ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "") # ⭐ Subtitle එකට Token එක ඕනේ නිසා
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
 
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
@@ -169,6 +171,19 @@ def process_and_translate_subtitle(video_path):
     subs.save(sin_sub_srt, encoding="utf-8")
     return sin_sub_srt
 
+# ⭐ JWT Token එක ගන්න Function එක ආයෙත් දැම්මා
+def get_abyss_token():
+    print("🔑 Authenticating with Abyss to get JWT Token for Subtitle...")
+    if not ABYSS_EMAIL or not ABYSS_PASSWORD: 
+        print("⚠️ Email or Password missing for Abyss!")
+        return None
+    try:
+        res = requests.post("https://api.abyss.to/auth/login", json={"email": ABYSS_EMAIL, "password": ABYSS_PASSWORD}).json()
+        return res.get("token")
+    except Exception as e: 
+        print(f"⚠️ Failed to get JWT Token: {e}")
+        return None
+
 def upload_video_to_abyss(video_path):
     print("☁️ Uploading Original Video to Abyss.to (ROOT)...")
     upload_filename = os.path.basename(video_path)
@@ -193,16 +208,24 @@ def upload_video_to_abyss(video_path):
             if attempt < 2: time.sleep(15)
     return None, 0
 
-def upload_subtitle_to_abyss_api(vhd_code, srt_path):
+# ⭐ Subtitle Upload එක හරියටම Token එකත් එක්ක යවන විදිහට හැදුවා
+def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     print(f"☁️ Uploading Sinhala Subtitle...")
     try:
         url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
-        headers = {"Content-Type": "application/octet-stream"} 
-        # Uploading subtitle to root files usually doesn't require JWT, just the file code.
+        headers = {
+            "Authorization": f"Bearer {token}", 
+            "Content-Type": "application/octet-stream"
+        } 
         with open(srt_path, "rb") as f: sub_data = f.read()
-        requests.put(url, headers=headers, data=sub_data, timeout=60)
-        print("🎉 Subtitle Attached Successfully!")
-    except: pass
+        resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
+        
+        if resp.status_code == 200:
+            print("🎉 Subtitle Attached Successfully!")
+        else:
+            print(f"⚠️ Subtitle upload failed. Status Code: {resp.status_code} | Reply: {resp.text}")
+    except Exception as e: 
+        print(f"⚠️ Subtitle Upload Error: {e}")
 
 def update_database(file_code):
     print("💾 Updating Firestore...")
@@ -219,12 +242,16 @@ original_video = download_video()
 if original_video:
     srt_sub_path = process_and_translate_subtitle(original_video)
     
+    # ⭐ Token එක ගන්නවා
+    jwt_token = get_abyss_token()
+    
     upload_result = upload_video_to_abyss(original_video)
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        if srt_sub_path and os.path.exists(srt_sub_path):
-            upload_subtitle_to_abyss_api(file_code, srt_sub_path)
+        # ⭐ Token එකයි Sub එකයි දෙකම තියෙනවා නම් විතරක් අප්ලෝඩ් කරනවා
+        if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
+            upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
             
         update_database(file_code)
         notify_status("success", file_size)
