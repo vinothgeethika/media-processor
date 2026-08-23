@@ -41,10 +41,13 @@ if not firebase_admin._apps:
 fs_db = firestore.client()
 
 # --- ⚙️ ABYSS.TO API SETTINGS ---
-ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "19136c9e1c8d2cac4e0e8b612008050a")
+ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
 ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")
 ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "")
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
+
+# Feedback Node එක වෙනස් කර ඇත (Bot 1 සඳහා)
+RTDB_WORKER_FEEDBACK = "worker_job_status_short"
 
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 anime_id = payload.get("anilist_id")
@@ -54,7 +57,7 @@ job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
-print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: API SOFTSUB (Premium)")
+print(f"🚀 [WORKER STARTED] Anime: {anime_title} | Ep: {ep_num} | Mode: API SOFTSUB (BOT 1)")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -63,7 +66,7 @@ os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 
 def notify_status(status="failed", file_size=0):
     try:
-        db.reference("worker_job_status").set({
+        db.reference(RTDB_WORKER_FEEDBACK).set({
             "status": status,
             "anilist_id": str(anime_id),
             "episode": int(ep_num),
@@ -183,7 +186,6 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
             
-    # 📌 Watermark Text - HTML format (SRT වල වැඩ කරන විදිහට)
     wm_text = "සිංහල උපසිරසි සමඟ Anime Movies/Series\nනැරඹීමට හා Download කිරීමට පිවිසෙන්න\n<font color=\"#1E90FF\">anishift.netlify.app</font>"
     
     start_wm = pysubs2.SSAEvent(start=5000, end=15000, text=wm_text)
@@ -194,7 +196,6 @@ def process_and_translate_subtitle(video_path):
         end_wm = pysubs2.SSAEvent(start=last_time + 2000, end=last_time + 12000, text=wm_text)
         subs.append(end_wm)
 
-    # සබ්ටයිටල් එක .SRT විදිහට සේව් කරනවා API එකට යවන්න ලේසි වෙන්න
     sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
     subs.save(sin_sub_srt, encoding="utf-8")
     print("✅ Sinhala .SRT Subtitle File Created Successfully!")
@@ -213,7 +214,7 @@ def upload_video_to_abyss(video_path):
             
             headers = {
                 'Content-Type': multipart_data.content_type,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+                'User-Agent': 'Mozilla/5.0'
             }
 
             up_resp = requests.post(ABYSS_UPLOAD_URL, data=multipart_data, headers=headers, timeout=1200)
@@ -306,7 +307,6 @@ if original_video:
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # 1. Get Token, 2. Upload Subtitle
         if srt_sub_path and os.path.exists(srt_sub_path):
             jwt_token = get_abyss_token()
             if jwt_token:
