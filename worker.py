@@ -85,6 +85,10 @@ def extract_ep_number(filename):
 
 def download_video():
     print(f"📥 Starting Download...")
+    
+    # ⭐ මෙන්න මේකයි අලුත් කෑල්ල: විනාඩි 5ක් ඇතුළත Speed 0 නම් Auto Stop වෙනවා
+    timeout_arg = '--bt-stop-timeout=300'
+    
     if search_type == "BATCH":
         subprocess.run(['aria2c', '--bt-metadata-only=true', '--bt-save-metadata=true', '--seed-time=0', '--bt-stop-timeout=120', magnet])
         torrent_files = glob.glob("*.torrent")
@@ -97,9 +101,9 @@ def download_video():
                     target_idx = idx
                     break
             if target_idx:
-                subprocess.run(['aria2c', '--seed-time=0', f'--select-file={target_idx}', f'--dir={BASE_DIR}', torrent_files[0]])
+                subprocess.run(['aria2c', '--seed-time=0', f'--select-file={target_idx}', f'--dir={BASE_DIR}', timeout_arg, torrent_files[0]])
     else:
-        subprocess.run(['aria2c', '--seed-time=0', f'--dir={BASE_DIR}', magnet])
+        subprocess.run(['aria2c', '--seed-time=0', f'--dir={BASE_DIR}', timeout_arg, magnet])
 
     target_ep_int = int(ep_num)
     for root, dirs, files in os.walk(BASE_DIR):
@@ -144,7 +148,6 @@ def process_and_translate_subtitle(video_path):
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
     extracted_successfully = False
 
-    # 1. Softsub චෙක් කිරීම
     target_stream = get_best_subtitle_stream(video_path)
     if target_stream is not None:
         print(f"📝 Extracting Subtitle Stream {target_stream}...")
@@ -152,7 +155,6 @@ def process_and_translate_subtitle(video_path):
         if os.path.exists(eng_sub) and os.path.getsize(eng_sub) >= 100:
             extracted_successfully = True
 
-    # 2. AI Audio Transcription (Softsub නැත්තම් විතරක්)
     if not extracted_successfully:
         print("⚠️ No valid softsub found! Starting AI Audio Transcription (Japanese -> English)...")
         print("⏳ This might take 10-20 minutes on GitHub Actions CPU...")
@@ -182,7 +184,6 @@ def process_and_translate_subtitle(video_path):
         print("❌ Could not extract or generate english subtitle. Skipping translation.")
         return None
 
-    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම
     print("⚡ Translating English Subtitle to Sinhala...")
     try: subs = pysubs2.load(eng_sub)
     except: return None
@@ -222,7 +223,6 @@ def process_and_translate_subtitle(video_path):
             cl = clean_vtt_tags(e.text)
             e.text = str(translation_map.get(cl, cl))
 
-    # Watermark අයින් කරලා කෙලින්ම සේව් කරනවා
     sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
     subs.save(sin_sub_srt, encoding="utf-8")
     return sin_sub_srt
@@ -230,13 +230,11 @@ def process_and_translate_subtitle(video_path):
 def get_abyss_token():
     print("🔑 Authenticating with Abyss to get JWT Token for Subtitle...")
     if not ABYSS_EMAIL or not ABYSS_PASSWORD: 
-        print("⚠️ Email or Password missing for Abyss!")
         return None
     try:
         res = requests.post("https://api.abyss.to/auth/login", json={"email": ABYSS_EMAIL, "password": ABYSS_PASSWORD}).json()
         return res.get("token")
     except Exception as e: 
-        print(f"⚠️ Failed to get JWT Token: {e}")
         return None
 
 def upload_video_to_abyss(video_path):
@@ -278,7 +276,7 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
         else:
             print(f"⚠️ Subtitle upload failed. Status Code: {resp.status_code}")
     except Exception as e: 
-        print(f"⚠️ Subtitle Upload Error: {e}")
+        pass
 
 def update_database(file_code):
     print("💾 Updating Firestore...")
