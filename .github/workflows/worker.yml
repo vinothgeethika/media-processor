@@ -32,7 +32,7 @@ jobs:
           # ඔයාගේ Github Secrets වල තියෙන නම FIREBASE_CREDENTIALS නෙමෙයි නම්, ඒ නම මෙතනට දාන්න.
           FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }} 
         run: |
-          echo "$FIREBASE_CREDENTIALS" > serviceAccountKey.json
+          echo "$FIREBASE_JSON" > serviceAccountKey.json
 
       - name: Run Worker Script
         env:
