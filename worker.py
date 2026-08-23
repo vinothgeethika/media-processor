@@ -6,7 +6,6 @@ import requests
 import subprocess
 import glob
 import re
-import concurrent.futures
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
@@ -182,48 +181,38 @@ def process_and_translate_subtitle(video_path):
         print("❌ Could not extract or generate english subtitle. Skipping translation.")
         return None
 
-    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම (Smart Progressive Fallback)
-    print("⚡ Translating English Subtitle to Sinhala...")
+    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම (STRICT LINE-BY-LINE)
+    print("⚡ Translating English Subtitle to Sinhala (Strict Mode)...")
     try: subs = pysubs2.load(eng_sub)
     except: return None
 
     unique_texts = list(set([clean_vtt_tags(e.text) for e in subs if e.text and len(clean_vtt_tags(e.text)) >= 2]))
     translation_map = {}
     
-    def translate_single_line(text):
-        for attempt in range(5):
+    def translate_with_retry(text):
+        # පාරවල් 10ක්ම ට්‍රයි කරනවා!
+        for attempt in range(10): 
             try:
+                # සාමාන්‍ය request එකකට කලින් පොඩි රෙස්ට් එකක්
+                time.sleep(0.5) 
                 res = GoogleTranslator(source='auto', target='si').translate(text)
-                if res and "Error 500" not in str(res): return apply_spoken_sinhala(res)
-            except: 
-                # Block වුණොත් වෙලාව ටික ටික වැඩි කරනවා (2s, 4s, 6s, 8s, 10s)
-                time.sleep(2 + (attempt * 2)) 
+                if res and "Error" not in str(res): 
+                    return apply_spoken_sinhala(res)
+            except Exception as e:
+                # බ්ලොක් වුණොත් වෙලාව වැඩි කර කර ඉන්නවා (3s, 6s, 9s... 30s)
+                wait_time = 3 + (attempt * 3)
+                print(f"⚠️ IP Blocked. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                
+        # කොහොමවත්ම බැරි වුණොත් විතරයි ඉංග්‍රීසි දෙන්නේ
         return text
 
-    def safe_translate_batch(batch_chunk):
-        batch_res, failed_lines = {}, []
-        try:
-            time.sleep(1.5) # සැක නොහිතෙන්න පොඩි ඩිලේ එකක්
-            res = GoogleTranslator(source='auto', target='si').translate_batch(batch_chunk)
-            for orig, trans in zip(batch_chunk, res):
-                if "Error 500" in str(trans): failed_lines.append(orig)
-                else: batch_res[orig] = apply_spoken_sinhala(trans)
-        except: 
-            failed_lines = list(batch_chunk)
-        
-        # බ්ලොක් වෙච්ච ටික (failed_lines) single line වලට යවනවා
-        for f_line in failed_lines: 
-            batch_res[f_line] = translate_single_line(f_line)
-        return batch_res
-
-    # කෑලි 10 ගානේ කඩනවා
-    chunks = [unique_texts[i:i+10] for i in range(0, len(unique_texts), 10)]
-    
-    # Workers ගාණ 2කට අඩු කළා (IP Block වීම අඩු කරන්න)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(safe_translate_batch, chunk) for chunk in chunks]
-        for future in concurrent.futures.as_completed(futures): 
-            translation_map.update(future.result())
+    # Batch කෑලි ඔක්කොම අයින් කළා. එකින් එක යවනවා. (IP Block වීම සම්පූර්ණයෙන්ම නවතී)
+    total_lines = len(unique_texts)
+    for idx, text in enumerate(unique_texts):
+        if idx % 50 == 0:
+            print(f"⏳ Translated {idx}/{total_lines} lines...")
+        translation_map[text] = translate_with_retry(text)
 
     for e in subs:
         if e.text:
