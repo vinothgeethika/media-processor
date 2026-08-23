@@ -1,4 +1,4 @@
-name: Cloud Uploader Worker
+name: Cloud Uploader Worker (Bot 1)
 
 on:
   repository_dispatch:
@@ -30,8 +30,6 @@ jobs:
 
       - name: Run Worker Script
         env:
-          VIDEHIDE_API_KEY: ${{ secrets.VIDEHIDE_API_KEY }}
-          SUBDL_API_KEY: ${{ secrets.SUBDL_API_KEY }}
           FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
           ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
           ABYSS_EMAIL: ${{ secrets.ABYSS_EMAIL }}
