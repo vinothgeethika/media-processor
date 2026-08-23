@@ -12,6 +12,7 @@ from firebase_admin import credentials, firestore, db
 import pysubs2
 from deep_translator import GoogleTranslator
 from requests_toolbelt.multipart.encoder import MultipartEncoder
+from faster_whisper import WhisperModel
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
 try:
@@ -38,8 +39,8 @@ if not firebase_admin._apps:
 fs_db = firestore.client()
 
 ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
-ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")       # ⭐ ආයෙත් මේ දෙක ගත්තා
-ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "") # ⭐ Subtitle එකට Token එක ඕනේ නිසා
+ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")       
+ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "") 
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
 
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
@@ -53,7 +54,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - ROOT UPLOAD] Anime: {safe_anime_title} | Ep: {ep_num}")
+print(f"🚀 [WORKER STARTED - SMART SUB] Anime: {safe_anime_title} | Ep: {ep_num}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -116,13 +117,76 @@ def clean_vtt_tags(text):
     t = re.sub(r'\{.*?\}', '', t).replace('\\h', ' ').replace('\\N', '\n')
     return re.sub(r'<[^>]+>', '', t).strip()
 
-def process_and_translate_subtitle(video_path):
-    print("📝 Extracting Embedded Subtitle from Video...")
-    eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
-    subprocess.run(['ffmpeg', '-i', video_path, '-map', '0:s:0', eng_sub, '-y'], stderr=subprocess.DEVNULL)
-    if not os.path.exists(eng_sub) or os.path.getsize(eng_sub) < 100: return None
+def get_best_subtitle_stream(video_path):
+    print("🔍 Scanning video for softsubs...")
+    cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 's',
+        '-show_entries', 'stream=index:stream_tags=language',
+        '-of', 'json', video_path
+    ]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        streams = json.loads(result.stdout).get('streams', [])
+        if not streams: return None
+        
+        # ඉංග්‍රීසි එකක් තියෙනවද බලනවා
+        for s in streams:
+            lang = s.get('tags', {}).get('language', '').lower()
+            if lang in ['eng', 'en', 'english']:
+                print(f"✅ Found English subtitle at stream index {s['index']}")
+                return s['index']
+                
+        # නැත්තම් තියෙන පළවෙනි එක ගන්නවා
+        print(f"⚠️ English not found. Taking default subtitle stream index {streams[0]['index']}")
+        return streams[0]['index']
+    except:
+        return None
 
-    print("⚡ Translating Extracted Subtitle to Sinhala...")
+def process_and_translate_subtitle(video_path):
+    eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
+    extracted_successfully = False
+
+    # 1. Softsub චෙක් කිරීම
+    target_stream = get_best_subtitle_stream(video_path)
+    if target_stream is not None:
+        print(f"📝 Extracting Subtitle Stream {target_stream}...")
+        subprocess.run(['ffmpeg', '-i', video_path, '-map', f'0:{target_stream}', eng_sub, '-y'], stderr=subprocess.DEVNULL)
+        if os.path.exists(eng_sub) and os.path.getsize(eng_sub) >= 100:
+            extracted_successfully = True
+
+    # 2. AI Audio Transcription (Softsub නැත්තම් විතරක්)
+    if not extracted_successfully:
+        print("⚠️ No valid softsub found! Starting AI Audio Transcription (Japanese -> English)...")
+        print("⏳ This might take 10-20 minutes on GitHub Actions CPU...")
+        
+        audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
+        subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
+        
+        if os.path.exists(audio_path):
+            try:
+                # "base" මොඩල් එක පාවිච්චි කරනවා CPU එකට ලේසි වෙන්න (Time Out නොවෙන්න)
+                model = WhisperModel("base", device="cpu", compute_type="int8")
+                segments, info = model.transcribe(audio_path, task="translate")
+                
+                subs = pysubs2.SSAFile()
+                for segment in segments:
+                    subs.events.append(pysubs2.SSAEvent(
+                        start=int(segment.start * 1000),
+                        end=int(segment.end * 1000),
+                        text=segment.text.strip()
+                    ))
+                subs.save(eng_sub, encoding="utf-8")
+                print("✅ AI Transcription Complete!")
+                extracted_successfully = True
+            except Exception as e:
+                print(f"❌ AI Transcription failed: {e}")
+        
+    if not extracted_successfully:
+        print("❌ Could not extract or generate english subtitle. Skipping translation.")
+        return None
+
+    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම
+    print("⚡ Translating English Subtitle to Sinhala...")
     try: subs = pysubs2.load(eng_sub)
     except: return None
 
@@ -171,7 +235,6 @@ def process_and_translate_subtitle(video_path):
     subs.save(sin_sub_srt, encoding="utf-8")
     return sin_sub_srt
 
-# ⭐ JWT Token එක ගන්න Function එක ආයෙත් දැම්මා
 def get_abyss_token():
     print("🔑 Authenticating with Abyss to get JWT Token for Subtitle...")
     if not ABYSS_EMAIL or not ABYSS_PASSWORD: 
@@ -208,7 +271,6 @@ def upload_video_to_abyss(video_path):
             if attempt < 2: time.sleep(15)
     return None, 0
 
-# ⭐ Subtitle Upload එක හරියටම Token එකත් එක්ක යවන විදිහට හැදුවා
 def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     print(f"☁️ Uploading Sinhala Subtitle...")
     try:
@@ -219,11 +281,10 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
         } 
         with open(srt_path, "rb") as f: sub_data = f.read()
         resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
-        
         if resp.status_code == 200:
             print("🎉 Subtitle Attached Successfully!")
         else:
-            print(f"⚠️ Subtitle upload failed. Status Code: {resp.status_code} | Reply: {resp.text}")
+            print(f"⚠️ Subtitle upload failed. Status Code: {resp.status_code}")
     except Exception as e: 
         print(f"⚠️ Subtitle Upload Error: {e}")
 
@@ -241,15 +302,11 @@ original_video = download_video()
 
 if original_video:
     srt_sub_path = process_and_translate_subtitle(original_video)
-    
-    # ⭐ Token එක ගන්නවා
     jwt_token = get_abyss_token()
-    
     upload_result = upload_video_to_abyss(original_video)
+    
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
-        
-        # ⭐ Token එකයි Sub එකයි දෙකම තියෙනවා නම් විතරක් අප්ලෝඩ් කරනවා
         if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
             upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
             
