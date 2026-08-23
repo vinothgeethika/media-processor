@@ -51,9 +51,7 @@ magnet = payload.get("magnet")
 job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
-
-# ⭐ Master Bot එවපු FOLDER ID එක මෙතනින් ගන්නවා! ⭐
-folder_id = payload.get("folder_id") 
+folder_id = payload.get("folder_id")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
 print(f"🚀 [WORKER STARTED] Anime: {safe_anime_title} | Ep: {ep_num} | Folder ID: {folder_id}")
@@ -183,15 +181,28 @@ def get_abyss_token():
     except: return None
 
 def move_video_to_folder(file_id, folder_id, token):
-    print(f"📦 Moving video to Folder {folder_id}...")
+    print(f"📦 Moving video {file_id} to Folder {folder_id}...")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    url = f"https://api.abyss.to/v1/files/{file_id}?folderId={folder_id}" # API Docs වලට අනුව Query Parameter එක
+    url = f"https://api.abyss.to/v1/files/{file_id}"
+    
+    payload = {
+        "folderId": folder_id,
+        "folder_id": folder_id,
+        "parentId": folder_id,
+        "parent_id": folder_id
+    }
+    
     try:
-        resp = requests.patch(url, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            resp = requests.put(url, headers=headers, json={"folderId": folder_id}, timeout=30)
-        if resp.status_code == 200: print("✅ Video moved successfully!")
-        else: print(f"⚠️ Move Failed. Status: {resp.status_code}")
+        resp = requests.put(url, headers=headers, json=payload, timeout=30)
+        if resp.status_code == 200: 
+            print("✅ Video moved to folder successfully (PUT)!")
+        else:
+            print(f"⚠️ PUT Failed ({resp.status_code}). Trying PATCH...")
+            resp2 = requests.patch(url, headers=headers, json=payload, timeout=30)
+            if resp2.status_code == 200:
+                print("✅ Video moved to folder successfully (PATCH)!")
+            else:
+                print(f"⚠️ Move Failed entirely. Status: {resp2.status_code} | {resp2.text}")
     except Exception as e: print(f"⚠️ Error moving video: {e}")
 
 def upload_video_to_abyss(video_path, folder_id):
@@ -202,7 +213,11 @@ def upload_video_to_abyss(video_path, folder_id):
     for attempt in range(3):
         try:
             fields = {'file': (upload_filename, open(video_path, 'rb'), mime_type)}
-            if folder_id: fields['folderId'] = str(folder_id) 
+            if folder_id: 
+                fields['folderId'] = str(folder_id) 
+                fields['folder_id'] = str(folder_id)
+                fields['parentId'] = str(folder_id)
+
             multipart_data = MultipartEncoder(fields=fields)
             headers = {'Content-Type': multipart_data.content_type, 'User-Agent': 'Mozilla/5.0'}
 
@@ -249,7 +264,6 @@ if original_video:
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
         
-        # Payload එකෙන් ආපු folder_id එකට කෙලින්ම Move කිරීම
         if jwt_token and folder_id:
             move_video_to_folder(file_code, folder_id, jwt_token)
         
