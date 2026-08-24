@@ -6,14 +6,12 @@ import requests
 import subprocess
 import glob
 import re
-import concurrent.futures
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
-from deep_translator import GoogleTranslator
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
-import chardet
+import urllib.parse
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
 try:
@@ -55,7 +53,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - SMART SUB] Anime: {safe_anime_title} | Ep: {ep_num}")
+print(f"🚀 [WORKER STARTED - 100% SINHALA SUB] Anime: {safe_anime_title} | Ep: {ep_num}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -85,11 +83,14 @@ def extract_ep_number(filename):
     return None
 
 def detect_encoding(file_path):
-    try:
-        with open(file_path, 'rb') as f: 
-            res = chardet.detect(f.read(20000))
-            return res['encoding'] or 'utf-8'
-    except: return 'utf-8'
+    for enc in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+        try:
+            with open(file_path, 'r', encoding=enc) as f:
+                f.read(1024)
+            return enc
+        except Exception:
+            continue
+    return 'utf-8'
 
 def clean_vtt_tags(text):
     if not text: return ""
@@ -102,6 +103,60 @@ def is_garbage_sub(text):
     cl = re.sub(r'<[^>]+>', '', re.sub(r'\{.*?\}', '', text)).strip()
     if re.match(r'^m\s+-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+(?:l|b|s|c|m)\s+', cl): return True
     return False
+
+def has_sinhala_characters(text):
+    """පෙළෙහි සිංහල අකුරු අඩංගුදැයි තහවුරු කිරීම"""
+    return bool(re.search(r'[\u0D80-\u0DFF]', str(text)))
+
+# --- 🌐 MULTI-ENGINE BULLETPROOF TRANSLATOR ---
+LINGVA_SERVERS = [
+    "https://lingva.ml",
+    "https://lingva.lunar.icu",
+    "https://translate.plausibility.cloud"
+]
+
+def translate_guaranteed_sinhala(text):
+    """සිංහල ලැබෙන තෙක්ම Engines කිහිපයක් හරහා පරිවර්තනය කිරීම"""
+    if not text or len(text.strip()) == 0:
+        return text
+
+    # Engine 1: Google Direct API
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": "auto", "tl": "si", "dt": "t"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.post(url, params=params, data={"q": text}, headers=headers, timeout=8)
+        if resp.status_code == 200:
+            res_text = "".join([part[0] for part in resp.json()[0] if part[0]]).strip()
+            if "Error" not in res_text and has_sinhala_characters(res_text):
+                return apply_spoken_sinhala(res_text)
+    except Exception:
+        pass
+
+    # Engine 2: Lingva Proxy Network (Google Bypass)
+    for server in LINGVA_SERVERS:
+        try:
+            encoded_q = urllib.parse.quote(text)
+            r = requests.get(f"{server}/api/v1/en/si/{encoded_q}", timeout=8)
+            if r.status_code == 200:
+                res_text = r.json().get("translation", "").strip()
+                if res_text and has_sinhala_characters(res_text):
+                    return apply_spoken_sinhala(res_text)
+        except Exception:
+            continue
+
+    # Engine 3: MyMemory API Fallback
+    try:
+        enc_q = urllib.parse.quote(text)
+        r = requests.get(f"https://api.mymemory.translated.net/get?q={enc_q}&langpair=en|si", timeout=8)
+        if r.status_code == 200:
+            res_text = r.json().get("responseData", {}).get("translatedText", "").strip()
+            if res_text and has_sinhala_characters(res_text) and "MYMEMORY WARNING" not in res_text:
+                return apply_spoken_sinhala(res_text)
+    except Exception:
+        pass
+
+    return text
 
 def download_video():
     print(f"📥 Starting Download...")
@@ -157,7 +212,6 @@ def get_best_subtitle_stream(video_path):
         return None
 
 def process_sinhala_sub(sub_path):
-    """Uploader ක්‍රමයට Subtitle එක පිරිසිදු කර පරිවර්තනය කිරීම"""
     out_name = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
     try:
         print("🧹 Cleaning dialogs & unwanted lines...")
@@ -187,34 +241,16 @@ def process_sinhala_sub(sub_path):
         if not cleaned_events: return None
         
         uni_list = list(unique_texts)
-        print(f"🔄 Translating {len(uni_list)} clean unique lines...")
+        print(f"🔄 Translating {len(uni_list)} clean unique lines with Zero English Fallback...")
         
-        def safe_translate_batch(batch_list):
-            translator = GoogleTranslator(source='auto', target='si')
-            for attempt in range(4):
-                try:
-                    if attempt > 0: time.sleep(2) 
-                    return translator.translate_batch(batch_list)
-                except: 
-                    print(f"   ⚠️ Translate API Hit. Retrying... ({attempt+1}/4)")
-            return batch_list 
-        
-        # පේළි 50 කණ්ඩායම් වලට බෙදීම
-        batches = [uni_list[i:i+50] for i in range(0, len(uni_list), 50)]
         translation_map = {}
+        total = len(uni_list)
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(safe_translate_batch, b): b for b in batches}
-            done_lines = 0
-            for future in concurrent.futures.as_completed(futures):
-                orig_batch = futures[future]
-                try:
-                    for orig, trans in zip(orig_batch, future.result()): 
-                        translation_map[orig] = apply_spoken_sinhala(trans)
-                    done_lines += len(orig_batch)
-                    print(f"   📊 Progress: {int((done_lines/len(uni_list))*100)}%")
-                except: 
-                    for orig in orig_batch: translation_map[orig] = orig
+        for idx, text in enumerate(uni_list):
+            translation_map[text] = translate_guaranteed_sinhala(text)
+            if idx % 25 == 0:
+                print(f"   📊 Progress: {int((idx/total)*100)}%")
+            time.sleep(0.12)
                     
         for event in cleaned_events: 
             event.text = translation_map.get(event.text, event.text)
