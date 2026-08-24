@@ -6,12 +6,14 @@ import requests
 import subprocess
 import glob
 import re
+import concurrent.futures
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
 from deep_translator import GoogleTranslator
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
+import chardet
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
 try:
@@ -82,6 +84,25 @@ def extract_ep_number(filename):
     if m: return int(m.group(1))
     return None
 
+def detect_encoding(file_path):
+    try:
+        with open(file_path, 'rb') as f: 
+            res = chardet.detect(f.read(20000))
+            return res['encoding'] or 'utf-8'
+    except: return 'utf-8'
+
+def clean_vtt_tags(text):
+    if not text: return ""
+    text = re.sub(r'\{.*?\}', '', text).replace('\\h', ' ')
+    return re.sub(r'<[^>]+>', '', text).strip()
+
+def is_garbage_sub(text):
+    if not text: return True
+    if re.search(r'\\pos\(|\\c&H|\\alpha|\\t\(|\\fad\(|\\an\d', text): return True
+    cl = re.sub(r'<[^>]+>', '', re.sub(r'\{.*?\}', '', text)).strip()
+    if re.match(r'^m\s+-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+(?:l|b|s|c|m)\s+', cl): return True
+    return False
+
 def download_video():
     print(f"📥 Starting Download...")
     timeout_arg = '--bt-stop-timeout=300'
@@ -112,12 +133,6 @@ def download_video():
             if f.endswith(('.mkv', '.mp4')): return os.path.join(root, f)
     return None
 
-def clean_vtt_tags(text):
-    if not text: return ""
-    t = str(text)
-    t = re.sub(r'\{.*?\}', '', t).replace('\\h', ' ').replace('\\N', '\n')
-    return re.sub(r'<[^>]+>', '', t).strip()
-
 def get_best_subtitle_stream(video_path):
     print("🔍 Scanning video for softsubs...")
     cmd = [
@@ -141,6 +156,76 @@ def get_best_subtitle_stream(video_path):
     except:
         return None
 
+def process_sinhala_sub(sub_path):
+    """Uploader ක්‍රමයට Subtitle එක පිරිසිදු කර පරිවර්තනය කිරීම"""
+    out_name = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
+    try:
+        print("🧹 Cleaning dialogs & unwanted lines...")
+        try: subs = pysubs2.load(sub_path, encoding=detect_encoding(sub_path))
+        except: subs = pysubs2.load(sub_path, encoding='latin-1')
+        
+        cleaned_events, unique_texts, prev_text, seen_texts_count = [], set(), "", {}
+        bad_words = ['subtitle by', 'translated by', 'sync by', 'encoded by', 'www.', '.com', 'discord', 'telegram']
+        
+        for e in subs:
+            if is_garbage_sub(e.text): continue
+            txt, t_low = clean_vtt_tags(e.text), clean_vtt_tags(e.text).lower()
+            if any(x in t_low for x in bad_words) or len(txt) > 250 or len(txt) < 2 or '♪' in txt or '♫' in txt: continue
+            
+            if txt == prev_text:
+                if cleaned_events: cleaned_events[-1].end = max(cleaned_events[-1].end, e.end)
+                continue
+                
+            seen_texts_count[txt] = seen_texts_count.get(txt, 0) + 1
+            if len(txt) > 30 and seen_texts_count[txt] > 2: continue
+            
+            e.text = txt
+            cleaned_events.append(e)
+            unique_texts.add(txt)
+            prev_text = txt
+            
+        if not cleaned_events: return None
+        
+        uni_list = list(unique_texts)
+        print(f"🔄 Translating {len(uni_list)} clean unique lines...")
+        
+        def safe_translate_batch(batch_list):
+            translator = GoogleTranslator(source='auto', target='si')
+            for attempt in range(4):
+                try:
+                    if attempt > 0: time.sleep(2) 
+                    return translator.translate_batch(batch_list)
+                except: 
+                    print(f"   ⚠️ Translate API Hit. Retrying... ({attempt+1}/4)")
+            return batch_list 
+        
+        # පේළි 50 කණ්ඩායම් වලට බෙදීම
+        batches = [uni_list[i:i+50] for i in range(0, len(uni_list), 50)]
+        translation_map = {}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(safe_translate_batch, b): b for b in batches}
+            done_lines = 0
+            for future in concurrent.futures.as_completed(futures):
+                orig_batch = futures[future]
+                try:
+                    for orig, trans in zip(orig_batch, future.result()): 
+                        translation_map[orig] = apply_spoken_sinhala(trans)
+                    done_lines += len(orig_batch)
+                    print(f"   📊 Progress: {int((done_lines/len(uni_list))*100)}%")
+                except: 
+                    for orig in orig_batch: translation_map[orig] = orig
+                    
+        for event in cleaned_events: 
+            event.text = translation_map.get(event.text, event.text)
+            
+        subs.events = cleaned_events
+        subs.save(out_name, encoding="utf-8")
+        return out_name
+    except Exception as e:
+        print(f"❌ Error during translation: {e}")
+        return None
+
 def process_and_translate_subtitle(video_path):
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
     extracted_successfully = False
@@ -154,8 +239,6 @@ def process_and_translate_subtitle(video_path):
 
     if not extracted_successfully:
         print("⚠️ No valid softsub found! Starting AI Audio Transcription (Japanese -> English)...")
-        print("⏳ This might take 10-20 minutes on GitHub Actions CPU...")
-        
         audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
         subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
         
@@ -178,50 +261,9 @@ def process_and_translate_subtitle(video_path):
                 print(f"❌ AI Transcription failed: {e}")
         
     if not extracted_successfully:
-        print("❌ Could not extract or generate english subtitle. Skipping translation.")
         return None
 
-    # 3. ඉංග්‍රීසි -> සිංහල ට්‍රාන්ස්ලේට් කිරීම (STRICT LINE-BY-LINE)
-    print("⚡ Translating English Subtitle to Sinhala (Strict Mode)...")
-    try: subs = pysubs2.load(eng_sub)
-    except: return None
-
-    unique_texts = list(set([clean_vtt_tags(e.text) for e in subs if e.text and len(clean_vtt_tags(e.text)) >= 2]))
-    translation_map = {}
-    
-    def translate_with_retry(text):
-        # පාරවල් 10ක්ම ට්‍රයි කරනවා!
-        for attempt in range(10): 
-            try:
-                # සාමාන්‍ය request එකකට කලින් පොඩි රෙස්ට් එකක්
-                time.sleep(0.5) 
-                res = GoogleTranslator(source='auto', target='si').translate(text)
-                if res and "Error" not in str(res): 
-                    return apply_spoken_sinhala(res)
-            except Exception as e:
-                # බ්ලොක් වුණොත් වෙලාව වැඩි කර කර ඉන්නවා (3s, 6s, 9s... 30s)
-                wait_time = 3 + (attempt * 3)
-                print(f"⚠️ IP Blocked. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                
-        # කොහොමවත්ම බැරි වුණොත් විතරයි ඉංග්‍රීසි දෙන්නේ
-        return text
-
-    # Batch කෑලි ඔක්කොම අයින් කළා. එකින් එක යවනවා. (IP Block වීම සම්පූර්ණයෙන්ම නවතී)
-    total_lines = len(unique_texts)
-    for idx, text in enumerate(unique_texts):
-        if idx % 50 == 0:
-            print(f"⏳ Translated {idx}/{total_lines} lines...")
-        translation_map[text] = translate_with_retry(text)
-
-    for e in subs:
-        if e.text:
-            cl = clean_vtt_tags(e.text)
-            e.text = str(translation_map.get(cl, cl))
-
-    sin_sub_srt = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
-    subs.save(sin_sub_srt, encoding="utf-8")
-    return sin_sub_srt
+    return process_sinhala_sub(eng_sub)
 
 def get_abyss_token():
     print("🔑 Authenticating with Abyss to get JWT Token for Subtitle...")
@@ -258,7 +300,7 @@ def upload_video_to_abyss(video_path):
     return None, 0
 
 def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
-    print(f"☁️ Uploading Sinhala Subtitle...")
+    print("☁️ Uploading Sinhala Subtitle to Abyss...")
     try:
         url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
         headers = {
