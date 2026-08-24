@@ -10,10 +10,10 @@ jobs:
     
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -24,12 +24,11 @@ jobs:
 
       - name: Install Python Dependencies
         run: |
-          pip install requests firebase-admin pysubs2 deep-translator requests-toolbelt torrentool beautifulsoup4 python-dotenv faster-whisper
+          pip install --upgrade pip
+          pip install requests firebase-admin pysubs2 deep-translator requests-toolbelt torrentool beautifulsoup4 python-dotenv faster-whisper chardet
 
-      # ⭐ මෙන්න මේක තමයි කලින් මිස් වුණේ (Firebase JSON එක හදන ස්ටෙප් එක)
       - name: Create Firebase Service Account JSON
         env: 
-          # ඔයාගේ Github Secrets වල තියෙන නම FIREBASE_CREDENTIALS නෙමෙයි නම්, ඒ නම මෙතනට දාන්න.
           FIREBASE_JSON: ${{ secrets.FIREBASE_JSON }} 
         run: |
           echo "$FIREBASE_JSON" > serviceAccountKey.json
