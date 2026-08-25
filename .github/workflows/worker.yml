@@ -41,7 +41,6 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          # Google Firestore Bug Fix එක (2.34.0) මෙහි ඇත
           pip install google-api-core==2.34.0 requests firebase-admin pysubs2 deep-translator requests-toolbelt torrentool beautifulsoup4 python-dotenv faster-whisper chardet requests[socks]
 
       - name: Create Firebase Service Account JSON
@@ -52,6 +51,7 @@ jobs:
 
       - name: Run Worker Script
         env:
+          PYTHONUNBUFFERED: 1  # 🚀 මේකෙන් ලොග් එක හිරවෙන්නේ නැතුව Live පෙන්වයි
           JOB_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
           ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
