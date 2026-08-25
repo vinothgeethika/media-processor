@@ -53,7 +53,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - 100% SINHALA SUB] Anime: {safe_anime_title} | Ep: {ep_num}")
+print(f"🚀 [WORKER STARTED - SMART SUB V2] Anime: {safe_anime_title} | Ep: {ep_num}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -105,35 +105,35 @@ def is_garbage_sub(text):
     return False
 
 def has_sinhala_characters(text):
-    """පෙළෙහි සිංහල අකුරු අඩංගුදැයි තහවුරු කිරීම"""
     return bool(re.search(r'[\u0D80-\u0DFF]', str(text)))
 
-# --- 🌐 MULTI-ENGINE BULLETPROOF TRANSLATOR ---
-LINGVA_SERVERS = [
-    "https://lingva.ml",
-    "https://lingva.lunar.icu",
-    "https://translate.plausibility.cloud"
-]
+# --- 🌐 MULTI-ENGINE BULLETPROOF TRANSLATOR (WARP ENABLED) ---
+WARP_PROXIES = {
+    "http": "socks5://127.0.0.1:40000",
+    "https": "socks5://127.0.0.1:40000"
+}
+LINGVA_SERVERS = ["https://lingva.ml", "https://lingva.lunar.icu", "https://translate.plausibility.cloud"]
 
 def translate_guaranteed_sinhala(text):
-    """සිංහල ලැබෙන තෙක්ම Engines කිහිපයක් හරහා පරිවර්තනය කිරීම"""
+    """ Cloudflare WARP Proxy + Google Chrome Client API """
     if not text or len(text.strip()) == 0:
         return text
 
-    # Engine 1: Google Direct API
     try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "auto", "tl": "si", "dt": "t"}
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        resp = requests.post(url, params=params, data={"q": text}, headers=headers, timeout=8)
+        url = "https://clients5.google.com/translate_a/t"
+        params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        
+        resp = requests.get(url, params=params, headers=headers, proxies=WARP_PROXIES, timeout=8)
         if resp.status_code == 200:
-            res_text = "".join([part[0] for part in resp.json()[0] if part[0]]).strip()
-            if "Error" not in res_text and has_sinhala_characters(res_text):
-                return apply_spoken_sinhala(res_text)
-    except Exception:
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                res_text = str(data[0][0]) if isinstance(data[0], list) else str(data[0])
+                if has_sinhala_characters(res_text):
+                    return apply_spoken_sinhala(res_text)
+    except Exception as e:
         pass
 
-    # Engine 2: Lingva Proxy Network (Google Bypass)
     for server in LINGVA_SERVERS:
         try:
             encoded_q = urllib.parse.quote(text)
@@ -144,17 +144,6 @@ def translate_guaranteed_sinhala(text):
                     return apply_spoken_sinhala(res_text)
         except Exception:
             continue
-
-    # Engine 3: MyMemory API Fallback
-    try:
-        enc_q = urllib.parse.quote(text)
-        r = requests.get(f"https://api.mymemory.translated.net/get?q={enc_q}&langpair=en|si", timeout=8)
-        if r.status_code == 200:
-            res_text = r.json().get("responseData", {}).get("translatedText", "").strip()
-            if res_text and has_sinhala_characters(res_text) and "MYMEMORY WARNING" not in res_text:
-                return apply_spoken_sinhala(res_text)
-    except Exception:
-        pass
 
     return text
 
@@ -188,28 +177,77 @@ def download_video():
             if f.endswith(('.mkv', '.mp4')): return os.path.join(root, f)
     return None
 
-def get_best_subtitle_stream(video_path):
-    print("🔍 Scanning video for softsubs...")
+def extract_and_score_subtitles(video_path):
+    print("🔍 Scanning video for softsubs and calculating scores...")
+    eng_sub_path = os.path.join(TEMP_SUB_DIR, "extracted.srt")
+    
     cmd = [
         'ffprobe', '-v', 'error', '-select_streams', 's',
-        '-show_entries', 'stream=index:stream_tags=language',
+        '-show_entries', 'stream=index:stream_tags=language:stream_tags=title',
         '-of', 'json', video_path
     ]
+    
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         streams = json.loads(result.stdout).get('streams', [])
-        if not streams: return None
         
+        if not streams:
+            print("⚠️ No softsubs found in the video.")
+            return None
+
+        valid_subs_data = []
+
         for s in streams:
+            idx = s['index']
             lang = s.get('tags', {}).get('language', '').lower()
-            if lang in ['eng', 'en', 'english']:
-                print(f"✅ Found English subtitle at stream index {s['index']}")
-                return s['index']
+            title = s.get('tags', {}).get('title', '').lower()
+            
+            temp_sub = os.path.join(TEMP_SUB_DIR, f"temp_track_{idx}.srt")
+            subprocess.run(['ffmpeg', '-i', video_path, '-map', f'0:{idx}', temp_sub, '-y'], stderr=subprocess.DEVNULL)
+            
+            if os.path.exists(temp_sub) and os.path.getsize(temp_sub) > 100:
+                try:
+                    try:
+                        subs = pysubs2.load(temp_sub, encoding='utf-8')
+                    except:
+                        subs = pysubs2.load(temp_sub, encoding='latin-1')
+                        
+                    line_count = len(subs.events)
+                    
+                    # 🧮 ලකුණු දීමේ ක්‍රමය (Scoring Method)
+                    score = line_count
+                    if line_count >= 150:
+                        if lang == 'en' or 'eng' in title or 'english' in title:
+                            score += 100000 
+                        elif lang == 'ja' or 'jap' in title or 'romaji' in title:
+                            score -= 100000 
+                    else:
+                        score -= 50000 
+                        
+                    print(f"   📄 Track {idx} ('{title}'): {line_count} lines | Score: {score}")
+                    valid_subs_data.append({'index': idx, 'path': temp_sub, 'lines': line_count, 'score': score, 'name': title})
+                except Exception as e:
+                    pass
+
+        if valid_subs_data:
+            valid_subs_data.sort(key=lambda x: x['score'], reverse=True)
+            best_sub = valid_subs_data[0]
+            
+            # පේළි 150ට අඩු නම් (Signs/Songs) Reject කර AI එකට යැවීම
+            if best_sub['lines'] >= 150:
+                print(f"🏆 WINNER: Stream {best_sub['index']} ('{best_sub['name']}') with {best_sub['lines']} lines!")
+                os.rename(best_sub['path'], eng_sub_path)
                 
-        print(f"⚠️ English not found. Taking default subtitle stream index {streams[0]['index']}")
-        return streams[0]['index']
-    except:
-        return None
+                for loser in valid_subs_data[1:]:
+                    if os.path.exists(loser['path']): os.remove(loser['path'])
+                return eng_sub_path
+            else:
+                print("❌ Best subtitle track has less than 150 lines (Probably Signs/Songs). Rejecting...")
+                
+    except Exception as e:
+        print(f"❌ Error during subtitle scanning: {e}")
+
+    return None
 
 def process_sinhala_sub(sub_path):
     out_name = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
@@ -241,7 +279,7 @@ def process_sinhala_sub(sub_path):
         if not cleaned_events: return None
         
         uni_list = list(unique_texts)
-        print(f"🔄 Translating {len(uni_list)} clean unique lines with Zero English Fallback...")
+        print(f"🔄 Translating {len(uni_list)} clean unique lines with Cloudflare WARP Proxy...")
         
         translation_map = {}
         total = len(uni_list)
@@ -250,7 +288,7 @@ def process_sinhala_sub(sub_path):
             translation_map[text] = translate_guaranteed_sinhala(text)
             if idx % 25 == 0:
                 print(f"   📊 Progress: {int((idx/total)*100)}%")
-            time.sleep(0.12)
+            time.sleep(0.05) 
                     
         for event in cleaned_events: 
             event.text = translation_map.get(event.text, event.text)
@@ -266,15 +304,13 @@ def process_and_translate_subtitle(video_path):
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
     extracted_successfully = False
 
-    target_stream = get_best_subtitle_stream(video_path)
-    if target_stream is not None:
-        print(f"📝 Extracting Subtitle Stream {target_stream}...")
-        subprocess.run(['ffmpeg', '-i', video_path, '-map', f'0:{target_stream}', eng_sub, '-y'], stderr=subprocess.DEVNULL)
-        if os.path.exists(eng_sub) and os.path.getsize(eng_sub) >= 100:
-            extracted_successfully = True
+    best_sub_path = extract_and_score_subtitles(video_path)
+    if best_sub_path and os.path.exists(best_sub_path):
+        extracted_successfully = True
+        eng_sub = best_sub_path
 
     if not extracted_successfully:
-        print("⚠️ No valid softsub found! Starting AI Audio Transcription (Japanese -> English)...")
+        print("⚠️ Starting AI Audio Transcription (Japanese -> English) as fallback...")
         audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
         subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
         
@@ -302,7 +338,7 @@ def process_and_translate_subtitle(video_path):
     return process_sinhala_sub(eng_sub)
 
 def get_abyss_token():
-    print("🔑 Authenticating with Abyss to get JWT Token for Subtitle...")
+    print("🔑 Authenticating with Abyss...")
     if not ABYSS_EMAIL or not ABYSS_PASSWORD: 
         return None
     try:
@@ -312,7 +348,7 @@ def get_abyss_token():
         return None
 
 def upload_video_to_abyss(video_path):
-    print("☁️ Uploading Original Video to Abyss.to (ROOT)...")
+    print("☁️ Uploading Original Video to Abyss.to...")
     upload_filename = os.path.basename(video_path)
     mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
 
@@ -347,8 +383,6 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
         resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
         if resp.status_code == 200:
             print("🎉 Subtitle Attached Successfully!")
-        else:
-            print(f"⚠️ Subtitle upload failed. Status Code: {resp.status_code}")
     except Exception as e: 
         pass
 
