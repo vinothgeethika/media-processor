@@ -54,7 +54,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - ULTRA FAST SUB] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - FIX V5] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -105,7 +105,6 @@ def is_garbage_sub(text):
     if re.match(r'^m\s+-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+(?:l|b|s|c|m)\s+', cl): return True
     return False
 
-# WARP Proxy Configuration
 WARP_PROXIES = {
     "http": "socks5://127.0.0.1:40000",
     "https": "socks5://127.0.0.1:40000"
@@ -223,22 +222,30 @@ def process_sinhala_sub(sub_path):
         
         uni_list = list(unique_texts)
         total_lines = len(uni_list)
-        print(f"🚀 Translating {total_lines} clean lines using Ultra-Fast Batch Mode...", flush=True)
+        print(f"🚀 Translating {total_lines} lines...", flush=True)
         
         translation_map = {}
-        batch_size = 40
+        # Batch size එක අඩු කළා Error 500 එන එක නවත්වන්න
+        batch_size = 20
         batches = [uni_list[i:i + batch_size] for i in range(0, len(uni_list), batch_size)]
 
         def safe_translate_batch(batch_list):
             translator = GoogleTranslator(source='auto', target='si', proxies=WARP_PROXIES)
             for attempt in range(3):
                 try:
-                    return translator.translate_batch(batch_list)
+                    res = translator.translate_batch(batch_list)
+                    # ⚠️ Error 500 චෙක් කිරීම
+                    if res and isinstance(res, list):
+                        if any("Error 500" in str(r) for r in res if r):
+                            raise Exception("Google 500 Error")
+                        return res
                 except Exception:
-                    time.sleep(1)
+                    time.sleep(2)
+            # Fail වුනොත් Original English එකම දෙනවා, Error 500 වැටෙන්නෙ නෑ
             return batch_list
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Threads ගාණ 3 කට අඩු කළා Google එකෙන් Block නොවෙන්න
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             futures = {executor.submit(safe_translate_batch, b): b for b in batches}
             done_lines = 0
             for future in concurrent.futures.as_completed(futures):
@@ -246,7 +253,11 @@ def process_sinhala_sub(sub_path):
                 try:
                     results = future.result()
                     for orig, trans in zip(orig_batch, results):
-                        translation_map[orig] = apply_spoken_sinhala(str(trans)) if trans else orig
+                        # අමතර Check එකක්
+                        if trans and "Error 500" not in str(trans):
+                            translation_map[orig] = apply_spoken_sinhala(str(trans))
+                        else:
+                            translation_map[orig] = orig
                     done_lines += len(orig_batch)
                     print(f"   📊 Progress: {int((done_lines/total_lines)*100)}%", flush=True)
                 except Exception:
@@ -272,7 +283,7 @@ def process_and_translate_subtitle(video_path):
         eng_sub = best_sub_path
 
     if not extracted_successfully:
-        print("⚠️ Starting AI Audio Transcription as fallback (This takes ~10 mins)...", flush=True)
+        print("⚠️ Starting AI Audio Transcription as fallback...", flush=True)
         audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
         subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
         if os.path.exists(audio_path):
@@ -348,8 +359,11 @@ if original_video:
     jwt_token = get_abyss_token()
     
     print("✂️ Removing existing internal subtitles from video...", flush=True)
-    ext = os.path.splitext(original_video)[1]
-    clean_video = os.path.join(TEMP_SUB_DIR, f"clean_video{ext}")
+    
+    # ⚠️ මෙතනදී ඔරිජිනල් නමම තියාගන්න වෙනස් කළා
+    original_filename = os.path.basename(original_video)
+    clean_video = os.path.join(TEMP_SUB_DIR, original_filename)
+    
     subprocess.run(['ffmpeg', '-i', original_video, '-c', 'copy', '-sn', clean_video, '-y'], stderr=subprocess.DEVNULL)
     
     video_to_upload = clean_video if os.path.exists(clean_video) else original_video
