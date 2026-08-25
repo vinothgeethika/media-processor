@@ -13,6 +13,7 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 import urllib.parse
 import concurrent.futures
+from deep_translator import GoogleTranslator
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
 try:
@@ -53,7 +54,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V6 ULTRA FAST] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V7 ANY-LANG TO SINHALA] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -107,7 +108,6 @@ def is_garbage_sub(text):
 def has_sinhala_characters(text):
     return bool(re.search(r'[\u0D80-\u0DFF]', str(text)))
 
-# --- WARP Proxy Configuration ---
 WARP_PROXIES = {
     "http": "socks5://127.0.0.1:40000",
     "https": "socks5://127.0.0.1:40000"
@@ -118,7 +118,17 @@ def translate_guaranteed_sinhala(text):
     if not text or len(text.strip()) == 0:
         return text
 
-    # Engine 1: Google Direct API (Single line - highly stable)
+    # 🔥 Engine 1: Deep Translator (Auto -> Sinhala) - Retry 3 times
+    for attempt in range(3):
+        try:
+            translator = GoogleTranslator(source='auto', target='si', proxies=WARP_PROXIES)
+            res = translator.translate(text)
+            if res and has_sinhala_characters(res):
+                return apply_spoken_sinhala(res)
+        except Exception:
+            time.sleep(1)
+
+    # 🔥 Engine 2: Google Chrome Client API Fallback
     try:
         url = "https://clients5.google.com/translate_a/t"
         params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
@@ -133,18 +143,18 @@ def translate_guaranteed_sinhala(text):
                     return apply_spoken_sinhala(res_text)
     except: pass
 
-    # Engine 2: Lingva Fallback
+    # 🔥 Engine 3: Lingva Proxy Network Fallback (Auto -> Sinhala)
     for server in LINGVA_SERVERS:
         try:
             encoded_q = urllib.parse.quote(text)
-            r = requests.get(f"{server}/api/v1/en/si/{encoded_q}", timeout=5)
+            r = requests.get(f"{server}/api/v1/auto/si/{encoded_q}", timeout=5)
             if r.status_code == 200:
                 res_text = r.json().get("translation", "").strip()
                 if res_text and has_sinhala_characters(res_text):
                     return apply_spoken_sinhala(res_text)
         except: continue
 
-    return text
+    return text # ඔක්කොම fail වුණොත් විතරක් original එක දෙනවා
 
 def download_video():
     print(f"📥 Starting Download...", flush=True)
@@ -258,15 +268,15 @@ def process_sinhala_sub(sub_path):
         
         uni_list = list(unique_texts)
         total_lines = len(uni_list)
-        print(f"🚀 Translating {total_lines} lines (Multi-Threaded Single Mode)...", flush=True)
+        print(f"🚀 Translating {total_lines} lines (Hyper-Threaded Auto-Detect Mode ⚡)...", flush=True)
         
         translation_map = {}
         
         def process_single(text):
             return text, translate_guaranteed_sinhala(text)
 
-        # 🔥 Threads 8 ක් යොදාගෙන තනි පේළි වේගයෙන් යැවීම (Error 500 සම්පූර්ණයෙන්ම වළක්වයි)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        # 🔥 Threads 15 ක් යොදාගෙන උපරිම වේගයෙන් Translate කිරීම
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(process_single, t) for t in uni_list]
             done_lines = 0
             for future in concurrent.futures.as_completed(futures):
