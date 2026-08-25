@@ -54,7 +54,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V7 ANY-LANG TO SINHALA] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V8 STRICT SINHALA] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -108,6 +108,10 @@ def is_garbage_sub(text):
 def has_sinhala_characters(text):
     return bool(re.search(r'[\u0D80-\u0DFF]', str(text)))
 
+def has_letters(text):
+    # ඉලක්කම් හෝ ලකුණු පමණක් නම් False දෙයි. අකුරු (English/Japanese) තිබේ නම් True දෙයි.
+    return bool(re.search(r'[a-zA-Z\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', str(text)))
+
 WARP_PROXIES = {
     "http": "socks5://127.0.0.1:40000",
     "https": "socks5://127.0.0.1:40000"
@@ -116,45 +120,49 @@ LINGVA_SERVERS = ["https://lingva.ml", "https://lingva.lunar.icu", "https://tran
 
 def translate_guaranteed_sinhala(text):
     if not text or len(text.strip()) == 0:
+        return ""
+
+    # අකුරු මුකුත් නැත්නම් (උදා: "1999" හෝ "...") ඒක කෙලින්ම යවන්න පුළුවන්
+    if not has_letters(text):
         return text
 
-    # 🔥 Engine 1: Deep Translator (Auto -> Sinhala) - Retry 3 times
-    for attempt in range(3):
+    for macro_attempt in range(2): # සම්පූර්ණ ක්‍රියාවලිය දෙපාරක් ට්‍රයි කරයි
+        # 🔥 Engine 1: Deep Translator with WARP
+        for attempt in range(2):
+            try:
+                translator = GoogleTranslator(source='auto', target='si', proxies=WARP_PROXIES)
+                res = translator.translate(text)
+                if res and has_sinhala_characters(res):
+                    return apply_spoken_sinhala(res)
+            except Exception:
+                time.sleep(1)
+
+        # 🔥 Engine 2: Google Chrome Client API Fallback
         try:
-            translator = GoogleTranslator(source='auto', target='si', proxies=WARP_PROXIES)
+            url = "https://clients5.google.com/translate_a/t"
+            params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = requests.get(url, params=params, headers=headers, proxies=WARP_PROXIES, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    res_text = str(data[0][0]) if isinstance(data[0], list) else str(data[0])
+                    if res_text and has_sinhala_characters(res_text):
+                        return apply_spoken_sinhala(res_text)
+        except: pass
+
+        # 🔥 Engine 3: Deep Translator WITHOUT WARP (Direct Connection)
+        try:
+            translator = GoogleTranslator(source='auto', target='si')
             res = translator.translate(text)
             if res and has_sinhala_characters(res):
                 return apply_spoken_sinhala(res)
-        except Exception:
-            time.sleep(1)
+        except: pass
 
-    # 🔥 Engine 2: Google Chrome Client API Fallback
-    try:
-        url = "https://clients5.google.com/translate_a/t"
-        params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
-        headers = {"User-Agent": "Mozilla/5.0"}
-        
-        resp = requests.get(url, params=params, headers=headers, proxies=WARP_PROXIES, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and len(data) > 0:
-                res_text = str(data[0][0]) if isinstance(data[0], list) else str(data[0])
-                if has_sinhala_characters(res_text):
-                    return apply_spoken_sinhala(res_text)
-    except: pass
+        time.sleep(1)
 
-    # 🔥 Engine 3: Lingva Proxy Network Fallback (Auto -> Sinhala)
-    for server in LINGVA_SERVERS:
-        try:
-            encoded_q = urllib.parse.quote(text)
-            r = requests.get(f"{server}/api/v1/auto/si/{encoded_q}", timeout=5)
-            if r.status_code == 200:
-                res_text = r.json().get("translation", "").strip()
-                if res_text and has_sinhala_characters(res_text):
-                    return apply_spoken_sinhala(res_text)
-        except: continue
-
-    return text # ඔක්කොම fail වුණොත් විතරක් original එක දෙනවා
+    # ⛔ 100% සිංහල නීතිය: මෙච්චර කරලත් සිංහල අකුරු ආවේ නැත්නම්, ඒ පේළිය සම්පූර්ණයෙන්ම මකා දමයි!
+    return ""
 
 def download_video():
     print(f"📥 Starting Download...", flush=True)
@@ -268,14 +276,13 @@ def process_sinhala_sub(sub_path):
         
         uni_list = list(unique_texts)
         total_lines = len(uni_list)
-        print(f"🚀 Translating {total_lines} lines (Hyper-Threaded Auto-Detect Mode ⚡)...", flush=True)
+        print(f"🚀 Translating {total_lines} lines (Strict Sinhala Mode ⚡)...", flush=True)
         
         translation_map = {}
         
         def process_single(text):
             return text, translate_guaranteed_sinhala(text)
 
-        # 🔥 Threads 15 ක් යොදාගෙන උපරිම වේගයෙන් Translate කිරීම
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(process_single, t) for t in uni_list]
             done_lines = 0
@@ -286,10 +293,15 @@ def process_sinhala_sub(sub_path):
                 if done_lines % 25 == 0 or done_lines == total_lines:
                     print(f"   📊 Progress: {int((done_lines/total_lines)*100)}%", flush=True)
                     
+        # හිස් (Blank) වුණු පේළි අයින් කරලා අලුත් ඉවෙන්ට් ලිස්ට් එකක් හදනවා
+        final_events = []
         for event in cleaned_events: 
-            event.text = translation_map.get(event.text, event.text)
+            translated_text = translation_map.get(event.text, event.text)
+            if translated_text != "":  # සිංහල නැතුව හිස් වුණු ඒවා අතහරිනවා
+                event.text = translated_text
+                final_events.append(event)
             
-        subs.events = cleaned_events
+        subs.events = final_events
         subs.save(out_name, encoding="utf-8")
         return out_name
     except Exception as e:
