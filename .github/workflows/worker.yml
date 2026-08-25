@@ -17,11 +17,20 @@ jobs:
         with:
           python-version: '3.10'
 
+      # 🚀 අලුතින් එකතු කළ Cache කොටස (මීට පස්සේ Packages Install වෙන්නේ පට ගාලා!)
+      - name: Cache Python Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install System Dependencies (Aria2, FFmpeg & Cloudflare WARP)
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 ffmpeg
-          # Cloudflare WARP VPN ස්ථාපනය (Error එක මඟහැරීමට --accept-tos එක් කර ඇත)
+          # Cloudflare WARP VPN
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update && sudo apt-get install -y cloudflare-warp
