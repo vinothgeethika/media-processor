@@ -4,6 +4,11 @@ on:
   repository_dispatch:
     types: [start_upload_job]
 
+# ⛔ එකම එපිසෝඩ් එක දෙපාරක් රන් වීම නැවැත්වීමට
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.client_payload.anilist_id }}-${{ github.event.client_payload.episode }}
+  cancel-in-progress: true
+
 jobs:
   process_video:
     runs-on: ubuntu-latest
@@ -51,7 +56,7 @@ jobs:
 
       - name: Run Worker Script
         env:
-          PYTHONUNBUFFERED: 1  # 🚀 මේකෙන් ලොග් එක හිරවෙන්නේ නැතුව Live පෙන්වයි
+          PYTHONUNBUFFERED: 1
           JOB_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
           ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
