@@ -29,7 +29,7 @@ def apply_spoken_sinhala(text):
         result_text = re.sub(pattern, value, result_text)
     return result_text
 
-# --- ⚙️ SETUP FIREBASE (Write Only) ---
+# --- ⚙️ SETUP FIREBASE ---
 cred = credentials.Certificate("serviceAccountKey.json")
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://anishift-5d14b-default-rtdb.firebaseio.com")
 
@@ -52,7 +52,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - SMART SUB V3] Anime: {safe_anime_title} | Ep: {ep_num}")
+print(f"🚀 [WORKER STARTED - SMART SUB V4] Anime: {safe_anime_title} | Ep: {ep_num}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -106,7 +106,7 @@ def is_garbage_sub(text):
 def has_sinhala_characters(text):
     return bool(re.search(r'[\u0D80-\u0DFF]', str(text)))
 
-# --- 🌐 MULTI-ENGINE BULLETPROOF TRANSLATOR (WARP ENABLED) ---
+# --- 🌐 MULTI-ENGINE BULLETPROOF TRANSLATOR ---
 WARP_PROXIES = {
     "http": "socks5://127.0.0.1:40000",
     "https": "socks5://127.0.0.1:40000"
@@ -114,14 +114,13 @@ WARP_PROXIES = {
 LINGVA_SERVERS = ["https://lingva.ml", "https://lingva.lunar.icu", "https://translate.plausibility.cloud"]
 
 def translate_guaranteed_sinhala(text):
-    """ Cloudflare WARP Proxy + Google Chrome Client API """
     if not text or len(text.strip()) == 0:
         return text
 
     try:
         url = "https://clients5.google.com/translate_a/t"
         params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         
         resp = requests.get(url, params=params, headers=headers, proxies=WARP_PROXIES, timeout=8)
         if resp.status_code == 200:
@@ -180,22 +179,16 @@ def extract_and_score_subtitles(video_path):
     print("🔍 Scanning video for softsubs and calculating scores...")
     eng_sub_path = os.path.join(TEMP_SUB_DIR, "extracted.srt")
     
-    cmd = [
-        'ffprobe', '-v', 'error', '-select_streams', 's',
-        '-show_entries', 'stream=index:stream_tags=language:stream_tags=title',
-        '-of', 'json', video_path
-    ]
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index:stream_tags=language:stream_tags=title', '-of', 'json', video_path]
     
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         streams = json.loads(result.stdout).get('streams', [])
         
         if not streams:
-            print("⚠️ No softsubs found in the video.")
             return None
 
         valid_subs_data = []
-
         for s in streams:
             idx = s['index']
             lang = s.get('tags', {}).get('language', '').lower()
@@ -206,46 +199,31 @@ def extract_and_score_subtitles(video_path):
             
             if os.path.exists(temp_sub) and os.path.getsize(temp_sub) > 100:
                 try:
-                    try:
-                        subs = pysubs2.load(temp_sub, encoding='utf-8')
-                    except:
-                        subs = pysubs2.load(temp_sub, encoding='latin-1')
+                    try: subs = pysubs2.load(temp_sub, encoding='utf-8')
+                    except: subs = pysubs2.load(temp_sub, encoding='latin-1')
                         
                     line_count = len(subs.events)
-                    
-                    # 🧮 ලකුණු දීමේ ක්‍රමය (Scoring Method)
                     score = line_count
                     if line_count >= 150:
-                        if lang == 'en' or 'eng' in title or 'english' in title:
-                            score += 100000 
-                        elif lang == 'ja' or 'jap' in title or 'romaji' in title:
-                            score -= 100000 
-                    else:
-                        score -= 50000 
+                        if lang == 'en' or 'eng' in title or 'english' in title: score += 100000 
+                        elif lang == 'ja' or 'jap' in title or 'romaji' in title: score -= 100000 
+                    else: score -= 50000 
                         
-                    print(f"   📄 Track {idx} ('{title}'): {line_count} lines | Score: {score}")
                     valid_subs_data.append({'index': idx, 'path': temp_sub, 'lines': line_count, 'score': score, 'name': title})
-                except Exception as e:
-                    pass
+                except Exception: pass
 
         if valid_subs_data:
             valid_subs_data.sort(key=lambda x: x['score'], reverse=True)
             best_sub = valid_subs_data[0]
             
-            # පේළි 150ට අඩු නම් (Signs/Songs) Reject කර AI එකට යැවීම
             if best_sub['lines'] >= 150:
                 print(f"🏆 WINNER: Stream {best_sub['index']} ('{best_sub['name']}') with {best_sub['lines']} lines!")
                 os.rename(best_sub['path'], eng_sub_path)
-                
                 for loser in valid_subs_data[1:]:
                     if os.path.exists(loser['path']): os.remove(loser['path'])
                 return eng_sub_path
-            else:
-                print("❌ Best subtitle track has less than 150 lines (Probably Signs/Songs). Rejecting...")
                 
-    except Exception as e:
-        print(f"❌ Error during subtitle scanning: {e}")
-
+    except Exception: pass
     return None
 
 def process_sinhala_sub(sub_path):
@@ -256,7 +234,9 @@ def process_sinhala_sub(sub_path):
         except: subs = pysubs2.load(sub_path, encoding='latin-1')
         
         cleaned_events, unique_texts, prev_text, seen_texts_count = [], set(), "", {}
-        bad_words = ['subtitle by', 'translated by', 'sync by', 'encoded by', 'www.', '.com', 'discord', 'telegram']
+        
+        # ⚠️ අලුතින් Netlify සහ අනිත් ඇඩ් වචන filter කිරීමට එකතු කර ඇත
+        bad_words = ['subtitle by', 'translated by', 'sync by', 'encoded by', 'www.', '.com', 'discord', 'telegram', 'netlify', 'anishift', 'download කිරීමට', 'නැරඹීමට']
         
         for e in subs:
             if is_garbage_sub(e.text): continue
@@ -278,7 +258,7 @@ def process_sinhala_sub(sub_path):
         if not cleaned_events: return None
         
         uni_list = list(unique_texts)
-        print(f"🔄 Translating {len(uni_list)} clean unique lines with Cloudflare WARP Proxy...")
+        print(f"🔄 Translating {len(uni_list)} clean lines...")
         
         translation_map = {}
         total = len(uni_list)
@@ -296,7 +276,7 @@ def process_sinhala_sub(sub_path):
         subs.save(out_name, encoding="utf-8")
         return out_name
     except Exception as e:
-        print(f"❌ Error during translation: {e}")
+        print(f"❌ Error: {e}")
         return None
 
 def process_and_translate_subtitle(video_path):
@@ -309,45 +289,33 @@ def process_and_translate_subtitle(video_path):
         eng_sub = best_sub_path
 
     if not extracted_successfully:
-        print("⚠️ Starting AI Audio Transcription (Japanese -> English) as fallback...")
+        print("⚠️ Starting AI Audio Transcription as fallback...")
         audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
         subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
-        
         if os.path.exists(audio_path):
             try:
                 model = WhisperModel("base", device="cpu", compute_type="int8")
                 segments, info = model.transcribe(audio_path, task="translate")
-                
                 subs = pysubs2.SSAFile()
                 for segment in segments:
-                    subs.events.append(pysubs2.SSAEvent(
-                        start=int(segment.start * 1000),
-                        end=int(segment.end * 1000),
-                        text=segment.text.strip()
-                    ))
+                    subs.events.append(pysubs2.SSAEvent(start=int(segment.start * 1000), end=int(segment.end * 1000), text=segment.text.strip()))
                 subs.save(eng_sub, encoding="utf-8")
-                print("✅ AI Transcription Complete!")
                 extracted_successfully = True
-            except Exception as e:
-                print(f"❌ AI Transcription failed: {e}")
+            except Exception: pass
         
-    if not extracted_successfully:
-        return None
-
+    if not extracted_successfully: return None
     return process_sinhala_sub(eng_sub)
 
 def get_abyss_token():
     print("🔑 Authenticating with Abyss...")
-    if not ABYSS_EMAIL or not ABYSS_PASSWORD: 
-        return None
+    if not ABYSS_EMAIL or not ABYSS_PASSWORD: return None
     try:
         res = requests.post("https://api.abyss.to/auth/login", json={"email": ABYSS_EMAIL, "password": ABYSS_PASSWORD}).json()
         return res.get("token")
-    except Exception as e: 
-        return None
+    except Exception: return None
 
 def upload_video_to_abyss(video_path):
-    print("☁️ Uploading Original Video to Abyss.to...")
+    print("☁️ Uploading Video to Abyss.to...")
     upload_filename = os.path.basename(video_path)
     mime_type = 'video/x-matroska' if upload_filename.endswith('.mkv') else 'video/mp4'
 
@@ -363,7 +331,7 @@ def upload_video_to_abyss(video_path):
                 if attempt < 2: time.sleep(15)
                 continue
 
-            if resp_data.get("status") is True or str(resp_data.get("status")) == "200":
+            if str(resp_data.get("status")) in ["True", "200", "true"]:
                 vhd_code = resp_data.get("slug") or resp_data.get("id") or resp_data.get("code")
                 if vhd_code: return vhd_code, os.path.getsize(video_path)
         except:
@@ -374,16 +342,11 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     print("☁️ Uploading Sinhala Subtitle to Abyss...")
     try:
         url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
-        headers = {
-            "Authorization": f"Bearer {token}", 
-            "Content-Type": "application/octet-stream"
-        } 
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"} 
         with open(srt_path, "rb") as f: sub_data = f.read()
         resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
-        if resp.status_code == 200:
-            print("🎉 Subtitle Attached Successfully!")
-    except Exception as e: 
-        pass
+        if resp.status_code == 200: print("🎉 Subtitle Attached Successfully!")
+    except Exception: pass
 
 def update_database(file_code):
     print("💾 Updating Firestore...")
@@ -400,7 +363,18 @@ original_video = download_video()
 if original_video:
     srt_sub_path = process_and_translate_subtitle(original_video)
     jwt_token = get_abyss_token()
-    upload_result = upload_video_to_abyss(original_video)
+    
+    # ✂️ අලුත් කෑල්ල: අනිත් භාෂා වල Subtitles ඔක්කොම වීඩියෝ එකෙන් අයින් කිරීම (Sub 4ක් වැටෙන එක නැවැත්වීමට)
+    print("✂️ Removing existing internal subtitles from video...")
+    ext = os.path.splitext(original_video)[1]
+    clean_video = os.path.join(TEMP_SUB_DIR, f"clean_video{ext}")
+    # '-sn' මඟින් වීඩියෝ එක ඇතුළේ තියෙන sub ටික අයින් කරයි
+    subprocess.run(['ffmpeg', '-i', original_video, '-c', 'copy', '-sn', clean_video, '-y'], stderr=subprocess.DEVNULL)
+    
+    # පිරිසිදු කරපු එක upload කරන්න දෙමු
+    video_to_upload = clean_video if os.path.exists(clean_video) else original_video
+    
+    upload_result = upload_video_to_abyss(video_to_upload)
     
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
