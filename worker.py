@@ -29,7 +29,7 @@ def apply_spoken_sinhala(text):
         result_text = re.sub(pattern, value, result_text)
     return result_text
 
-# --- ⚙️ SETUP FIREBASE ---
+# --- ⚙️ SETUP FIREBASE (Write Only) ---
 cred = credentials.Certificate("serviceAccountKey.json")
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://anishift-5d14b-default-rtdb.firebaseio.com")
 
@@ -41,7 +41,6 @@ ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
 ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")       
 ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "") 
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
-
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
@@ -53,7 +52,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - SMART SUB V2] Anime: {safe_anime_title} | Ep: {ep_num}")
+print(f"🚀 [WORKER STARTED - SMART SUB V3] Anime: {safe_anime_title} | Ep: {ep_num}")
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
