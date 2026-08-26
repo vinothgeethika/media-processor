@@ -60,7 +60,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V8 STRICT SINHALA] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V9 STRICT SINHALA TIMEOUT & RETRY] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -376,49 +376,106 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     except Exception: pass
 
 # ==========================================
-# 🚀 TELEGRAM UPLOAD FUNCTION (TELETHON METHOD)
+# 🚀 TELEGRAM UPLOAD FUNCTION (WITH PROGRESS & RETRY LOGIC)
 # ==========================================
 def upload_to_telegram(video_path, srt_path):
     if not all([TG_BOT_TOKEN, TG_DB_CHANNEL_ID, TG_API_ID, TG_API_HASH]):
         print("⚠️ Telegram credentials missing. Skipping Telegram upload.", flush=True)
         return None
         
-    print("📤 Uploading to Telegram Database Channel via Telethon...", flush=True)
+    print("📤 Connecting to Telegram Database Channel via Telethon...", flush=True)
     try:
         from telethon.sync import TelegramClient
+        import concurrent.futures
         
-        client = TelegramClient('tg_uploader_session_short', int(TG_API_ID), TG_API_HASH)
-        client.start(bot_token=TG_BOT_TOKEN)
-        
-        print("🔌 Resolving Channel Entity...", flush=True)
-        channel_entity = client.get_entity(int(TG_DB_CHANNEL_ID))
-        
-        # 🎬 ලස්සන කරපු Caption එක (මේකෙ ID මුකුත් පේන්න නෑ)
         caption = f"🎬 **{safe_anime_title} - Episode {ep_num}**"
         
-        print("🚀 Uploading Video File...", flush=True)
-        msg = client.send_file(
-            entity=channel_entity,
-            file=video_path,
-            caption=caption,
-            force_document=False,
-            supports_streaming=True
-        )
+        # 1. Upload Progress Bar Logic (GitHub Action Friendly)
+        last_printed_percent = [-1]
+        def progress_callback(current, total):
+            percent = int((current / total) * 100)
+            if percent % 10 == 0 and percent != last_printed_percent[0]:
+                print(f"   📈 Telegram Upload Progress: {percent}%", flush=True)
+                last_printed_percent[0] = percent
+
+        MAX_RETRIES = 3
         
-        if srt_path and os.path.exists(srt_path):
-            print("🚀 Uploading Subtitle File...", flush=True)
-            client.send_file(
-                entity=channel_entity,
-                file=srt_path,
-                reply_to=msg.id
-            )
+        for attempt in range(1, MAX_RETRIES + 1):
+            print(f"\n🚀 Telegram Upload Attempt {attempt}/{MAX_RETRIES}...", flush=True)
             
-        print(f"✅ Telegram Upload Success! Message ID: {msg.id}", flush=True)
-        client.disconnect()
-        return msg.id
+            try:
+                # 2. අලුත් Session එකක් හදනවා හැම Attempt එකකදීම
+                session_name = f'tg_uploader_session_short_{anime_id}_{ep_num}'
+                client = TelegramClient(
+                    session_name, 
+                    int(TG_API_ID), 
+                    TG_API_HASH,
+                    request_retries=3,
+                    connection_retries=3,
+                    timeout=60
+                )
+                client.start(bot_token=TG_BOT_TOKEN)
+                channel_entity = client.get_entity(int(TG_DB_CHANNEL_ID))
+                
+                def do_upload():
+                    last_printed_percent[0] = -1 
+                    return client.send_file(
+                        entity=channel_entity,
+                        file=video_path,
+                        caption=caption,
+                        force_document=False,
+                        supports_streaming=True,
+                        progress_callback=progress_callback
+                    )
+                
+                msg = None
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(do_upload)
+                    msg = future.result(timeout=900) # විනාඩි 15 ක උපරිම කාලය
+                
+                if msg:
+                    if srt_path and os.path.exists(srt_path):
+                        print("🚀 Uploading Subtitle File...", flush=True)
+                        client.send_file(
+                            entity=channel_entity,
+                            file=srt_path,
+                            reply_to=msg.id
+                        )
+                    print(f"✅ Telegram Upload Success! Message ID: {msg.id}", flush=True)
+                    client.disconnect()
+                    
+                    try:
+                        os.remove(f"{session_name}.session")
+                    except: pass
+                    
+                    return msg.id
+                    
+            except concurrent.futures.TimeoutError:
+                print(f"❌ Telegram Upload HUNG! Timeout reached (15 mins) on Attempt {attempt}.", flush=True)
+                try: client.disconnect()
+                except: pass
+                
+                if attempt < MAX_RETRIES:
+                    print("🔄 Retrying in 10 seconds...", flush=True)
+                    time.sleep(10)
+                else:
+                    print("❌ All upload attempts failed due to timeouts.", flush=True)
+                    return None
+                    
+            except Exception as loop_e:
+                print(f"❌ Telegram Upload Error during Attempt {attempt}: {loop_e}", flush=True)
+                try: client.disconnect()
+                except: pass
+                
+                if attempt < MAX_RETRIES:
+                    time.sleep(10)
+                else:
+                    return None
+                    
+        return None
             
     except Exception as e:
-        print(f"❌ Telegram Upload Error (Telethon): {e}", flush=True)
+        print(f"❌ Critical Telegram Upload Error: {e}", flush=True)
         return None
 
 # ==========================================
@@ -428,7 +485,6 @@ def update_database(file_code, tg_msg_id=None):
     print("💾 Updating Firestore...", flush=True)
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
     
-    # 📌 ප්‍රොෆෙෂනල් Deep Link ID එක (185874-3)
     deep_link_id = f"{anime_id}-{ep_num}"
     
     data = {
@@ -474,6 +530,12 @@ if original_video:
         tg_msg_id = None
         if TG_BOT_TOKEN and TG_DB_CHANNEL_ID:
             tg_msg_id = upload_to_telegram(video_to_upload, srt_sub_path)
+            
+        # TG Upload එක Failed/Timeout වුණොත් Worker එක Fail කරලා නවත්තනවා
+        if TG_BOT_TOKEN and TG_DB_CHANNEL_ID and not tg_msg_id:
+            print("❌ Workflow Failed due to Telegram Upload Timeout or Error.", flush=True)
+            notify_status("failed", 0)
+            sys.exit(1)
             
         update_database(file_code, tg_msg_id)
         notify_status("success", file_size)
