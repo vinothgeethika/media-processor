@@ -63,7 +63,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V11 STRICT SINHALA (ASYNC FIXED)] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V13 BOT-1 DUAL AUDIO SMART] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -126,11 +126,8 @@ WARP_PROXIES = {
 }
 
 def translate_guaranteed_sinhala(text):
-    if not text or len(text.strip()) == 0:
-        return ""
-
-    if not has_letters(text):
-        return text
+    if not text or len(text.strip()) == 0: return ""
+    if not has_letters(text): return text
 
     for macro_attempt in range(2): 
         for attempt in range(2):
@@ -139,8 +136,7 @@ def translate_guaranteed_sinhala(text):
                 res = translator.translate(text)
                 if res and has_sinhala_characters(res):
                     return apply_spoken_sinhala(res)
-            except Exception:
-                time.sleep(1)
+            except Exception: time.sleep(1)
 
         try:
             url = "https://clients5.google.com/translate_a/t"
@@ -161,7 +157,6 @@ def translate_guaranteed_sinhala(text):
             if res and has_sinhala_characters(res):
                 return apply_spoken_sinhala(res)
         except: pass
-
         time.sleep(1)
 
     return ""
@@ -205,9 +200,7 @@ def extract_and_score_subtitles(video_path):
     try:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         streams = json.loads(result.stdout).get('streams', [])
-        
-        if not streams:
-            return None
+        if not streams: return None
 
         valid_subs_data = []
         for s in streams:
@@ -236,7 +229,6 @@ def extract_and_score_subtitles(video_path):
         if valid_subs_data:
             valid_subs_data.sort(key=lambda x: x['score'], reverse=True)
             best_sub = valid_subs_data[0]
-            
             if best_sub['lines'] >= 150:
                 print(f"🏆 WINNER: Stream {best_sub['index']} ('{best_sub['name']}') with {best_sub['lines']} lines!", flush=True)
                 os.rename(best_sub['path'], eng_sub_path)
@@ -281,9 +273,7 @@ def process_sinhala_sub(sub_path):
         print(f"🚀 Translating {total_lines} lines (Strict Sinhala Mode ⚡)...", flush=True)
         
         translation_map = {}
-        
-        def process_single(text):
-            return text, translate_guaranteed_sinhala(text)
+        def process_single(text): return text, translate_guaranteed_sinhala(text)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(process_single, t) for t in uni_list]
@@ -379,7 +369,7 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     except Exception: pass
 
 # ==========================================
-# 🚀 TELEGRAM UPLOAD FUNCTION (FIXED ASYNCIO + PROGRESS)
+# 🚀 TELEGRAM UPLOAD FUNCTION
 # ==========================================
 def upload_to_telegram(video_path, srt_path):
     if not all([TG_BOT_TOKEN, TG_DB_CHANNEL_ID, TG_API_ID, TG_API_HASH]):
@@ -409,40 +399,21 @@ def upload_to_telegram(video_path, srt_path):
             session_name = f'tg_uploader_session_short_{anime_id}_{ep_num}_{attempt}'
             
             def do_upload():
-                # 🛑 ERROR FIX: Set a new event loop for this background thread
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                client = TelegramClient(
-                    session_name, 
-                    int(TG_API_ID), 
-                    TG_API_HASH,
-                    request_retries=3,
-                    connection_retries=3,
-                    timeout=60
-                )
+                client = TelegramClient(session_name, int(TG_API_ID), TG_API_HASH, request_retries=3, connection_retries=3, timeout=60)
                 client.start(bot_token=TG_BOT_TOKEN)
                 channel_entity = client.get_entity(int(TG_DB_CHANNEL_ID))
                 
                 last_printed_percent[0] = -1 
                 
                 print("🚀 Uploading Video File...", flush=True)
-                msg = client.send_file(
-                    entity=channel_entity,
-                    file=video_path,
-                    caption=caption,
-                    force_document=False,
-                    supports_streaming=True,
-                    progress_callback=progress_callback
-                )
+                msg = client.send_file(entity=channel_entity, file=video_path, caption=caption, force_document=False, supports_streaming=True, progress_callback=progress_callback)
                 
                 if msg and srt_path and os.path.exists(srt_path):
                     print("🚀 Uploading Subtitle File...", flush=True)
-                    client.send_file(
-                        entity=channel_entity,
-                        file=srt_path,
-                        reply_to=msg.id
-                    )
+                    client.send_file(entity=channel_entity, file=srt_path, reply_to=msg.id)
                     
                 client.disconnect()
                 return msg.id
@@ -450,13 +421,11 @@ def upload_to_telegram(video_path, srt_path):
             msg_id = None
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(do_upload)
-                try:
-                    msg_id = future.result(timeout=2700) # 45 minutes
+                try: msg_id = future.result(timeout=2700) 
                 except concurrent.futures.TimeoutError:
-                    print(f"❌ Telegram Upload HUNG! Timeout reached (45 mins) on Attempt {attempt}.", flush=True)
+                    print(f"❌ Telegram Upload HUNG! Timeout reached on Attempt {attempt}.", flush=True)
             
-            try:
-                os.remove(f"{session_name}.session")
+            try: os.remove(f"{session_name}.session")
             except: pass
             
             if msg_id:
@@ -480,23 +449,15 @@ def upload_to_telegram(video_path, srt_path):
 def update_database(file_code, tg_msg_id=None):
     print("💾 Updating Firestore...", flush=True)
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
-    
     deep_link_id = f"{anime_id}-{ep_num}"
     
     data = {
         'status': 'uploaded',
-        'links': {
-            'abyss_video_id': file_code, 
-            'abyss_embed': f"https://abyss.to/embed/{file_code}"
-        },
+        'links': {'abyss_video_id': file_code, 'abyss_embed': f"https://abyss.to/embed/{file_code}"},
         'last_updated': firestore.SERVER_TIMESTAMP
     }
-    
     if tg_msg_id:
-        data['telegram'] = {
-            'message_id': tg_msg_id,
-            'deep_link_id': deep_link_id
-        }
+        data['telegram'] = {'message_id': tg_msg_id, 'deep_link_id': deep_link_id}
         
     fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set(data, merge=True)
 
@@ -507,15 +468,53 @@ if original_video:
     srt_sub_path = process_and_translate_subtitle(original_video)
     jwt_token = get_abyss_token()
     
-    print("✂️ Removing existing internal subtitles from video...", flush=True)
-    
+    print("✂️ Processing Dual-Audio & removing internal subtitles...", flush=True)
     original_filename = os.path.basename(original_video)
     clean_video = os.path.join(TEMP_SUB_DIR, original_filename)
     
-    subprocess.run(['ffmpeg', '-i', original_video, '-c', 'copy', '-sn', clean_video, '-y'], stderr=subprocess.DEVNULL)
+    # 🔥 DUAL-AUDIO SMART LOGIC (Language Code + Title Check)
+    try:
+        probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index:stream_tags=language:stream_tags=title', '-of', 'json', original_video]
+        probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        audio_streams = json.loads(probe_res.stdout).get('streams', [])
+        
+        audio_map = ['-map', '0:a?'] 
+        
+        if len(audio_streams) > 1:
+            print(f"🔊 Dual-Audio detected! ({len(audio_streams)} audio tracks). Finding Japanese track...", flush=True)
+            jpn_index = None
+            non_eng_index = None
+            
+            for s in audio_streams:
+                lang = s.get('tags', {}).get('language', '').lower()
+                title = s.get('tags', {}).get('title', '').lower()
+                
+                # 🔥 ජැපනීස් ද කියලා බලනවා
+                if lang in ['ja', 'jpn', 'japanese'] or 'japanese' in title or '日本語' in title or 'nihongo' in title:
+                    jpn_index = s['index']
+                    break
+                
+                # English නෙවෙයි නම් ඒකත් අරන් තියාගන්නවා (Fallback)
+                if lang not in ['en', 'eng', 'english'] and 'english' not in title and non_eng_index is None:
+                    non_eng_index = s['index']
+            
+            if jpn_index is not None:
+                audio_map = ['-map', f'0:{jpn_index}']
+            elif non_eng_index is not None:
+                audio_map = ['-map', f'0:{non_eng_index}']
+            else:
+                audio_map = ['-map', '0:a:0']
+        else:
+            audio_map = ['-map', '0:a:0?']
+            
+        ff_cmd = ['ffmpeg', '-i', original_video, '-map', '0:v:0'] + audio_map + ['-c', 'copy', '-sn', clean_video, '-y']
+        subprocess.run(ff_cmd, stderr=subprocess.DEVNULL)
+        
+    except Exception as e:
+        print(f"⚠️ Audio parsing failed, falling back to basic cleanup...", flush=True)
+        subprocess.run(['ffmpeg', '-i', original_video, '-c', 'copy', '-sn', clean_video, '-y'], stderr=subprocess.DEVNULL)
     
     video_to_upload = clean_video if os.path.exists(clean_video) else original_video
-    
     upload_result = upload_video_to_abyss(video_to_upload)
     
     if upload_result and upload_result[0]:
@@ -527,7 +526,6 @@ if original_video:
         if TG_BOT_TOKEN and TG_DB_CHANNEL_ID:
             tg_msg_id = upload_to_telegram(video_to_upload, srt_sub_path)
             
-        # TG Upload එක Failed/Timeout වුණොත් Worker එක Fail කරලා නවත්තනවා
         if TG_BOT_TOKEN and TG_DB_CHANNEL_ID and not tg_msg_id:
             print("❌ Workflow Failed due to Telegram Upload Timeout or Error.", flush=True)
             notify_status("failed", 0)
