@@ -45,6 +45,12 @@ ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "")
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
+# Telegram Credentials
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
+TG_DB_CHANNEL_ID = os.environ.get("TG_DB_CHANNEL_ID")
+TG_API_ID = os.environ.get("TG_API_ID")
+TG_API_HASH = os.environ.get("TG_API_HASH")
+
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 anime_id = payload.get("anilist_id")
 ep_num = payload.get("episode")
@@ -109,25 +115,21 @@ def has_sinhala_characters(text):
     return bool(re.search(r'[\u0D80-\u0DFF]', str(text)))
 
 def has_letters(text):
-    # ඉලක්කම් හෝ ලකුණු පමණක් නම් False දෙයි. අකුරු (English/Japanese) තිබේ නම් True දෙයි.
     return bool(re.search(r'[a-zA-Z\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', str(text)))
 
 WARP_PROXIES = {
     "http": "socks5://127.0.0.1:40000",
     "https": "socks5://127.0.0.1:40000"
 }
-LINGVA_SERVERS = ["https://lingva.ml", "https://lingva.lunar.icu", "https://translate.plausibility.cloud"]
 
 def translate_guaranteed_sinhala(text):
     if not text or len(text.strip()) == 0:
         return ""
 
-    # අකුරු මුකුත් නැත්නම් (උදා: "1999" හෝ "...") ඒක කෙලින්ම යවන්න පුළුවන්
     if not has_letters(text):
         return text
 
-    for macro_attempt in range(2): # සම්පූර්ණ ක්‍රියාවලිය දෙපාරක් ට්‍රයි කරයි
-        # 🔥 Engine 1: Deep Translator with WARP
+    for macro_attempt in range(2): 
         for attempt in range(2):
             try:
                 translator = GoogleTranslator(source='auto', target='si', proxies=WARP_PROXIES)
@@ -137,7 +139,6 @@ def translate_guaranteed_sinhala(text):
             except Exception:
                 time.sleep(1)
 
-        # 🔥 Engine 2: Google Chrome Client API Fallback
         try:
             url = "https://clients5.google.com/translate_a/t"
             params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
@@ -151,7 +152,6 @@ def translate_guaranteed_sinhala(text):
                         return apply_spoken_sinhala(res_text)
         except: pass
 
-        # 🔥 Engine 3: Deep Translator WITHOUT WARP (Direct Connection)
         try:
             translator = GoogleTranslator(source='auto', target='si')
             res = translator.translate(text)
@@ -161,7 +161,6 @@ def translate_guaranteed_sinhala(text):
 
         time.sleep(1)
 
-    # ⛔ 100% සිංහල නීතිය: මෙච්චර කරලත් සිංහල අකුරු ආවේ නැත්නම්, ඒ පේළිය සම්පූර්ණයෙන්ම මකා දමයි!
     return ""
 
 def download_video():
@@ -293,11 +292,10 @@ def process_sinhala_sub(sub_path):
                 if done_lines % 25 == 0 or done_lines == total_lines:
                     print(f"   📊 Progress: {int((done_lines/total_lines)*100)}%", flush=True)
                     
-        # හිස් (Blank) වුණු පේළි අයින් කරලා අලුත් ඉවෙන්ට් ලිස්ට් එකක් හදනවා
         final_events = []
         for event in cleaned_events: 
             translated_text = translation_map.get(event.text, event.text)
-            if translated_text != "":  # සිංහල නැතුව හිස් වුණු ඒවා අතහරිනවා
+            if translated_text != "": 
                 event.text = translated_text
                 final_events.append(event)
             
@@ -377,14 +375,78 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
         if resp.status_code == 200: print("🎉 Subtitle Attached Successfully!", flush=True)
     except Exception: pass
 
-def update_database(file_code):
+# ==========================================
+# 🚀 TELEGRAM UPLOAD FUNCTION (TELETHON METHOD)
+# ==========================================
+def upload_to_telegram(video_path, srt_path):
+    if not all([TG_BOT_TOKEN, TG_DB_CHANNEL_ID, TG_API_ID, TG_API_HASH]):
+        print("⚠️ Telegram credentials missing. Skipping Telegram upload.", flush=True)
+        return None
+        
+    print("📤 Uploading to Telegram Database Channel via Telethon...", flush=True)
+    try:
+        from telethon.sync import TelegramClient
+        
+        client = TelegramClient('tg_uploader_session_short', int(TG_API_ID), TG_API_HASH)
+        client.start(bot_token=TG_BOT_TOKEN)
+        
+        print("🔌 Resolving Channel Entity...", flush=True)
+        channel_entity = client.get_entity(int(TG_DB_CHANNEL_ID))
+        
+        # 🎬 ලස්සන කරපු Caption එක (මේකෙ ID මුකුත් පේන්න නෑ)
+        caption = f"🎬 **{safe_anime_title} - Episode {ep_num}**"
+        
+        print("🚀 Uploading Video File...", flush=True)
+        msg = client.send_file(
+            entity=channel_entity,
+            file=video_path,
+            caption=caption,
+            force_document=False,
+            supports_streaming=True
+        )
+        
+        if srt_path and os.path.exists(srt_path):
+            print("🚀 Uploading Subtitle File...", flush=True)
+            client.send_file(
+                entity=channel_entity,
+                file=srt_path,
+                reply_to=msg.id
+            )
+            
+        print(f"✅ Telegram Upload Success! Message ID: {msg.id}", flush=True)
+        client.disconnect()
+        return msg.id
+            
+    except Exception as e:
+        print(f"❌ Telegram Upload Error (Telethon): {e}", flush=True)
+        return None
+
+# ==========================================
+# 💾 FIRESTORE UPDATE
+# ==========================================
+def update_database(file_code, tg_msg_id=None):
     print("💾 Updating Firestore...", flush=True)
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
-    fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set({
+    
+    # 📌 ප්‍රොෆෙෂනල් Deep Link ID එක (185874-3)
+    deep_link_id = f"{anime_id}-{ep_num}"
+    
+    data = {
         'status': 'uploaded',
-        'links': {'abyss_video_id': file_code, 'abyss_embed': f"https://abyss.to/embed/{file_code}"},
+        'links': {
+            'abyss_video_id': file_code, 
+            'abyss_embed': f"https://abyss.to/embed/{file_code}"
+        },
         'last_updated': firestore.SERVER_TIMESTAMP
-    }, merge=True)
+    }
+    
+    if tg_msg_id:
+        data['telegram'] = {
+            'message_id': tg_msg_id,
+            'deep_link_id': deep_link_id
+        }
+        
+    fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set(data, merge=True)
 
 # --- MAIN EXECUTION ---
 original_video = download_video()
@@ -409,7 +471,11 @@ if original_video:
         if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
             upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
             
-        update_database(file_code)
+        tg_msg_id = None
+        if TG_BOT_TOKEN and TG_DB_CHANNEL_ID:
+            tg_msg_id = upload_to_telegram(video_to_upload, srt_sub_path)
+            
+        update_database(file_code, tg_msg_id)
         notify_status("success", file_size)
         print("🎉 WORKER COMPLETED SUCCESSFULLY!", flush=True)
         sys.exit(0)
