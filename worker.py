@@ -63,7 +63,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V13 BOT-1 DUAL AUDIO SMART] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V14 BOT-1 PYROGRAM FAST UPLOAD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -369,26 +369,33 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     except Exception: pass
 
 # ==========================================
-# 🚀 TELEGRAM UPLOAD FUNCTION
+# 🚀 TELEGRAM UPLOAD FUNCTION (PYROGRAM)
 # ==========================================
 def upload_to_telegram(video_path, srt_path):
     if not all([TG_BOT_TOKEN, TG_DB_CHANNEL_ID, TG_API_ID, TG_API_HASH]):
         print("⚠️ Telegram credentials missing. Skipping Telegram upload.", flush=True)
         return None
         
-    print("📤 Connecting to Telegram Database Channel via Telethon...", flush=True)
+    print("📤 Connecting to Telegram Database Channel via Pyrogram...", flush=True)
     try:
-        from telethon.sync import TelegramClient
-        import concurrent.futures
-        import asyncio
+        from pyrogram import Client
         
         caption = f"🎬 **{safe_anime_title} - Episode {ep_num}**"
         
+        # 🔥 මෙතනින් තමයි ID එකද, @Username එකද කියලා හරියටම අඳුරගන්නේ
+        target_chat_str = str(TG_DB_CHANNEL_ID).strip()
+        if target_chat_str.startswith("@"):
+            target_chat = target_chat_str
+        elif target_chat_str.lstrip("-").isdigit():
+            target_chat = int(target_chat_str)
+        else:
+            target_chat = target_chat_str
+        
         last_printed_percent = [-1]
-        def progress_callback(current, total):
+        def progress(current, total):
             percent = int((current / total) * 100)
             if percent % 10 == 0 and percent != last_printed_percent[0]:
-                print(f"   📈 Telegram Upload Progress: {percent}%", flush=True)
+                print(f"   📈 Pyrogram Upload Progress: {percent}%", flush=True)
                 last_printed_percent[0] = percent
 
         MAX_RETRIES = 3
@@ -398,34 +405,43 @@ def upload_to_telegram(video_path, srt_path):
             
             session_name = f'tg_uploader_session_short_{anime_id}_{ep_num}_{attempt}'
             
-            def do_upload():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                client = TelegramClient(session_name, int(TG_API_ID), TG_API_HASH, request_retries=3, connection_retries=3, timeout=60)
-                client.start(bot_token=TG_BOT_TOKEN)
-                channel_entity = client.get_entity(int(TG_DB_CHANNEL_ID))
-                
-                last_printed_percent[0] = -1 
-                
-                print("🚀 Uploading Video File...", flush=True)
-                msg = client.send_file(entity=channel_entity, file=video_path, caption=caption, force_document=False, supports_streaming=True, progress_callback=progress_callback)
-                
-                if msg and srt_path and os.path.exists(srt_path):
-                    print("🚀 Uploading Subtitle File...", flush=True)
-                    client.send_file(entity=channel_entity, file=srt_path, reply_to=msg.id)
-                    
-                client.disconnect()
-                return msg.id
+            app = Client(
+                session_name,
+                api_id=int(TG_API_ID),
+                api_hash=TG_API_HASH,
+                bot_token=TG_BOT_TOKEN
+            )
             
             msg_id = None
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(do_upload)
-                try: msg_id = future.result(timeout=2700) 
-                except concurrent.futures.TimeoutError:
-                    print(f"❌ Telegram Upload HUNG! Timeout reached on Attempt {attempt}.", flush=True)
+            try:
+                with app:
+                    last_printed_percent[0] = -1 
+                    
+                    print("🚀 Uploading Video File...", flush=True)
+                    msg = app.send_document(
+                        chat_id=target_chat,
+                        document=video_path,
+                        caption=caption,
+                        force_document=False,
+                        progress=progress
+                    )
+                    
+                    if msg and srt_path and os.path.exists(srt_path):
+                        print("🚀 Uploading Subtitle File...", flush=True)
+                        app.send_document(
+                            chat_id=target_chat,
+                            document=srt_path,
+                            reply_to_message_id=msg.id
+                        )
+                    msg_id = msg.id
+                    
+            except Exception as e:
+                print(f"❌ Pyrogram Upload Error: {e}", flush=True)
             
-            try: os.remove(f"{session_name}.session")
+            # Session ෆයිල් ටික මකලා දානවා (GitHub Actions වල Storage පිරෙන්නේ නැති වෙන්න)
+            try:
+                os.remove(f"{session_name}.session")
+                os.remove(f"{session_name}.session-journal")
             except: pass
             
             if msg_id:
