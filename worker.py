@@ -13,7 +13,7 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 import urllib.parse
 import concurrent.futures
-import random  # 🔥 Random Delay එකට මේක දැම්මා
+import random  
 from deep_translator import GoogleTranslator
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
@@ -64,7 +64,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V16 BOT-1 PYROGRAM NO-FLOOD + WHISPER SMALL] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V17 BOT-1 FIREBASE CACHE NO-FLOOD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -315,7 +315,6 @@ def process_and_translate_subtitle(video_path):
         subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
         if os.path.exists(audio_path):
             try:
-                # 🔥 Whisper Small Model එක සහ vad_filter එකතු කළා
                 model = WhisperModel("small", device="cpu", compute_type="int8")
                 segments, info = model.transcribe(audio_path, task="translate", vad_filter=True, beam_size=5)
                 subs = pysubs2.SSAFile()
@@ -371,6 +370,37 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     except Exception: pass
 
 # ==========================================
+# 🚀 TELEGRAM SESSION CACHING (FIREBASE)
+# ==========================================
+def get_pyrogram_session():
+    doc_ref = fs_db.collection('bot_config').document('pyrogram_session')
+    doc = doc_ref.get()
+    if doc.exists and doc.to_dict().get('session_string'):
+        return doc.to_dict().get('session_string')
+    
+    # ⏳ එකපාර මැෂින් ගොඩක් Start වුණොත් එන අවුල නවත්තන්න Random Delay එකක්
+    sleep_t = random.randint(1, 20)
+    print(f"⏳ Session not found! Waiting {sleep_t}s to prevent race conditions...", flush=True)
+    time.sleep(sleep_t)
+    
+    doc = doc_ref.get()
+    if doc.exists and doc.to_dict().get('session_string'):
+        return doc.to_dict().get('session_string')
+        
+    print("⚠️ Creating a new Pyrogram session and saving to Firebase...", flush=True)
+    try:
+        from pyrogram import Client
+        temp_app = Client("temp_maker", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN, in_memory=True)
+        with temp_app:
+            session_str = temp_app.export_session_string()
+            doc_ref.set({'session_string': session_str})
+            print("✅ New Pyrogram session saved to Firebase!", flush=True)
+            return session_str
+    except Exception as e:
+        print(f"❌ Failed to create session: {e}", flush=True)
+        return None
+
+# ==========================================
 # 🚀 TELEGRAM UPLOAD FUNCTION (PYROGRAM)
 # ==========================================
 def upload_to_telegram(video_path, srt_path):
@@ -380,10 +410,7 @@ def upload_to_telegram(video_path, srt_path):
         
     print("📤 Connecting to Telegram Database Channel via Pyrogram...", flush=True)
     
-    # 🔥 මෙතන තමයි ගේම් චේන්ජර් එක! එකපාර Log in වෙන එක වළක්වන්න Random Time එකක් නිදාගන්නවා
-    sleep_time = random.randint(10, 75)
-    print(f"⏳ Avoiding Telegram Flood! Waiting {sleep_time} seconds before logging in...", flush=True)
-    time.sleep(sleep_time)
+    session_string = get_pyrogram_session()
     
     try:
         from pyrogram import Client
@@ -410,14 +437,10 @@ def upload_to_telegram(video_path, srt_path):
         for attempt in range(1, MAX_RETRIES + 1):
             print(f"\n🚀 Telegram Upload Attempt {attempt}/{MAX_RETRIES}...", flush=True)
             
-            # 🔥 GitHub Actions මකන නිසා in_memory=True පාවිච්චි කරනවා
-            app = Client(
-                "tg_memory_session_short",
-                api_id=int(TG_API_ID),
-                api_hash=TG_API_HASH,
-                bot_token=TG_BOT_TOKEN,
-                in_memory=True
-            )
+            if session_string:
+                app = Client("memory_upload", session_string=session_string, api_id=int(TG_API_ID), api_hash=TG_API_HASH, in_memory=True)
+            else:
+                app = Client("memory_upload", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN, in_memory=True)
             
             msg_id = None
             try:
