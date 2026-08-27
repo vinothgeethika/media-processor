@@ -63,7 +63,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V14 BOT-1 PYROGRAM FAST UPLOAD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V15 BOT-1 PYROGRAM FAST UPLOAD + WHISPER SMALL] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -309,13 +309,14 @@ def process_and_translate_subtitle(video_path):
         eng_sub = best_sub_path
 
     if not extracted_successfully:
-        print("⚠️ Starting AI Audio Transcription as fallback...", flush=True)
+        print("⚠️ Starting AI Audio Transcription as fallback (small model)...", flush=True)
         audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
         subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
         if os.path.exists(audio_path):
             try:
-                model = WhisperModel("base", device="cpu", compute_type="int8")
-                segments, info = model.transcribe(audio_path, task="translate")
+                # 🔥 Whisper Small Model එක සහ vad_filter එකතු කළා
+                model = WhisperModel("small", device="cpu", compute_type="int8")
+                segments, info = model.transcribe(audio_path, task="translate", vad_filter=True, beam_size=5)
                 subs = pysubs2.SSAFile()
                 for segment in segments:
                     subs.events.append(pysubs2.SSAEvent(start=int(segment.start * 1000), end=int(segment.end * 1000), text=segment.text.strip()))
@@ -438,8 +439,6 @@ def upload_to_telegram(video_path, srt_path):
             except Exception as e:
                 print(f"❌ Pyrogram Upload Error: {e}", flush=True)
             
-            # 🔥 කලින් තිබුණ Session ෆයිල් මකන කෑල්ල සම්පූර්ණයෙන්ම අයින් කළා.
-            
             if msg_id:
                 print(f"✅ Telegram Upload Success! Message ID: {msg_id}", flush=True)
                 return msg_id
@@ -484,7 +483,7 @@ if original_video:
     original_filename = os.path.basename(original_video)
     clean_video = os.path.join(TEMP_SUB_DIR, original_filename)
     
-    # 🔥 DUAL-AUDIO SMART LOGIC (Language Code + Title Check)
+    # 🔥 DUAL-AUDIO SMART LOGIC
     try:
         probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index:stream_tags=language:stream_tags=title', '-of', 'json', original_video]
         probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -501,12 +500,9 @@ if original_video:
                 lang = s.get('tags', {}).get('language', '').lower()
                 title = s.get('tags', {}).get('title', '').lower()
                 
-                # 🔥 ජැපනීස් ද කියලා බලනවා
                 if lang in ['ja', 'jpn', 'japanese'] or 'japanese' in title or '日本語' in title or 'nihongo' in title:
                     jpn_index = s['index']
                     break
-                
-                # English නෙවෙයි නම් ඒකත් අරන් තියාගන්නවා (Fallback)
                 if lang not in ['en', 'eng', 'english'] and 'english' not in title and non_eng_index is None:
                     non_eng_index = s['index']
             
