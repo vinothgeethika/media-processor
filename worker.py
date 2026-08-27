@@ -63,7 +63,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V20 BOT-1 RTDB QUEUE NO-FLOOD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V21 BOT-1 AUTO-RECOVER SESSION] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -368,34 +368,10 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
         if resp.status_code == 200: print("🎉 Subtitle Attached Successfully!", flush=True)
     except Exception: pass
 
-# ==========================================
-# 🚀 RTDB QUEUE & SESSION SYSTEM
-# ==========================================
-def acquire_upload_lock():
-    lock_ref = db.reference('bot_config/upload_lock')
-    print("\n⏳ Entering Telegram Upload Queue (Waiting for Lock via RTDB)...", flush=True)
-    while True:
-        data = lock_ref.get()
-        if data and data.get('is_locked') == True:
-            locked_time = data.get('locked_at', 0)
-            if time.time() - locked_time > 1500:
-                print("🔓 Lock seems stuck from a crash. Forcing unlock...", flush=True)
-                lock_ref.set({'is_locked': False, 'locked_at': 0})
-                continue
-            print("⏳ Another episode is currently uploading. Waiting in queue (15s)...", flush=True)
-            time.sleep(15)
-            continue
-        
-        lock_ref.set({'is_locked': True, 'locked_at': time.time()})
-        print("🔒 Lock Acquired via RTDB! It's our turn.", flush=True)
-        break
 
-def release_upload_lock():
-    try:
-        db.reference('bot_config/upload_lock').set({'is_locked': False, 'locked_at': 0})
-        print("🔓 Lock Released via RTDB!", flush=True)
-    except: pass
-
+# ==========================================
+# 🚀 SESSION CACHING SYSTEM
+# ==========================================
 def get_pyrogram_session():
     session_ref = db.reference('bot_config/pyrogram_session')
     session_str = session_ref.get()
@@ -403,14 +379,14 @@ def get_pyrogram_session():
     if session_str:
         return session_str
         
-    print("⚠️ Creating a NEW Pyrogram session and saving to RTDB...", flush=True)
+    print("⚠️ Session not found in DB! Creating a NEW Pyrogram session...", flush=True)
     try:
         from pyrogram import Client
         temp_app = Client("temp_maker", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN, in_memory=True)
         with temp_app:
             new_session_str = temp_app.export_session_string()
             session_ref.set(new_session_str)
-            print("✅ New Pyrogram session saved to RTDB!", flush=True)
+            print("✅ New session string generated and saved to DB!", flush=True)
             return new_session_str
     except Exception as e:
         print(f"❌ Failed to create session: {e}", flush=True)
@@ -426,32 +402,30 @@ def upload_to_telegram(video_path, srt_path):
         
     print("📤 Connecting to Telegram Database Channel via Pyrogram...", flush=True)
     
-    acquire_upload_lock() # 🔥 RTDB එකෙන් පෝලිමේ ඉන්නවා
+    from pyrogram import Client
     
-    try:
+    caption = f"🎬 **{safe_anime_title} - Episode {ep_num}**"
+    target_chat_str = str(TG_DB_CHANNEL_ID).strip()
+    target_chat = target_chat_str if target_chat_str.startswith("@") else int(target_chat_str)
+    
+    last_printed_percent = [-1]
+    def progress(current, total):
+        percent = int((current / total) * 100)
+        if percent % 10 == 0 and percent != last_printed_percent[0]:
+            print(f"   📈 Pyrogram Upload Progress: {percent}%", flush=True)
+            last_printed_percent[0] = percent
+
+    MAX_RETRIES = 3
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(f"\n🚀 Telegram Upload Attempt {attempt}/{MAX_RETRIES}...", flush=True)
+        
         session_string = get_pyrogram_session() 
         if not session_string:
-            return None
+            print("⚠️ Session generation failed. Retrying...", flush=True)
+            time.sleep(10)
+            continue
             
-        from pyrogram import Client
-        
-        caption = f"🎬 **{safe_anime_title} - Episode {ep_num}**"
-        
-        target_chat_str = str(TG_DB_CHANNEL_ID).strip()
-        if target_chat_str.startswith("@"):
-            target_chat = target_chat_str
-        elif target_chat_str.lstrip("-").isdigit():
-            target_chat = int(target_chat_str)
-        else:
-            target_chat = target_chat_str
-        
-        last_printed_percent = [-1]
-        def progress(current, total):
-            percent = int((current / total) * 100)
-            if percent % 10 == 0 and percent != last_printed_percent[0]:
-                print(f"   📈 Pyrogram Upload Progress: {percent}%", flush=True)
-                last_printed_percent[0] = percent
-
         app = Client("memory_upload", session_string=session_string, api_id=int(TG_API_ID), api_hash=TG_API_HASH, in_memory=True)
         
         msg_id = None
@@ -476,22 +450,25 @@ def upload_to_telegram(video_path, srt_path):
                 msg_id = msg.id
                 
         except Exception as e:
-            if "AUTH" in str(e) or "Session" in str(e):
+            error_text = str(e)
+            print(f"❌ Pyrogram Error: {error_text}", flush=True)
+            
+            # 🔥 අන්න මෙතන තමයි මැජික් එක!
+            # Error එක "AUTH_KEY_DUPLICATED" හෝ "406" නම්, ඩේටාබේස් එකේ තියෙන අවුල් ගිය Session එක මකලා දානවා.
+            # එතකොට ඊළඟ Retry Loop එකේදී අලුත්ම Session එකක් හැදෙනවා!
+            if "AUTH_KEY_DUPLICATED" in error_text or "406" in error_text or "AUTH" in error_text:
+                print("⚠️ Ghost Connection Detected! Deleting old session from DB to create a fresh one...", flush=True)
                 db.reference('bot_config/pyrogram_session').delete()
-                print("🗑️ Session deleted from RTDB due to auth error. Will recreate next time.", flush=True)
-            print(f"❌ Pyrogram Upload Error: {e}", flush=True)
         
         if msg_id:
             print(f"✅ Telegram Upload Success! Message ID: {msg_id}", flush=True)
             return msg_id
             
-        return None
-            
-    except Exception as e:
-        print(f"❌ Critical Telegram Upload Error: {e}", flush=True)
-        return None
-    finally:
-        release_upload_lock() # 🔥 කොහොම හරි අන්තිමට ලොක් එක අරිනවා
+        # ෆේල් වුණොත් තත්පර 10ක් ඉඳලා ඊළඟ Attempt එකට යනවා
+        time.sleep(10)
+        
+    print("❌ All upload attempts failed.", flush=True)
+    return None
 
 # ==========================================
 # 💾 FIRESTORE UPDATE
