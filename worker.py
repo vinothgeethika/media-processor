@@ -13,6 +13,7 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 import urllib.parse
 import concurrent.futures
+import random  # 🔥 Random Delay එකට මේක දැම්මා
 from deep_translator import GoogleTranslator
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
@@ -63,7 +64,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V15 BOT-1 PYROGRAM FAST UPLOAD + WHISPER SMALL] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V16 BOT-1 PYROGRAM NO-FLOOD + WHISPER SMALL] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -378,6 +379,12 @@ def upload_to_telegram(video_path, srt_path):
         return None
         
     print("📤 Connecting to Telegram Database Channel via Pyrogram...", flush=True)
+    
+    # 🔥 මෙතන තමයි ගේම් චේන්ජර් එක! එකපාර Log in වෙන එක වළක්වන්න Random Time එකක් නිදාගන්නවා
+    sleep_time = random.randint(10, 75)
+    print(f"⏳ Avoiding Telegram Flood! Waiting {sleep_time} seconds before logging in...", flush=True)
+    time.sleep(sleep_time)
+    
     try:
         from pyrogram import Client
         
@@ -400,17 +407,16 @@ def upload_to_telegram(video_path, srt_path):
 
         MAX_RETRIES = 3
         
-        # 🔥 එකම Session එක පාවිච්චි කරන්න නම Static කළා
-        session_name = 'tg_uploader_main_session_short'
-        
         for attempt in range(1, MAX_RETRIES + 1):
             print(f"\n🚀 Telegram Upload Attempt {attempt}/{MAX_RETRIES}...", flush=True)
             
+            # 🔥 GitHub Actions මකන නිසා in_memory=True පාවිච්චි කරනවා
             app = Client(
-                session_name,
+                "tg_memory_session_short",
                 api_id=int(TG_API_ID),
                 api_hash=TG_API_HASH,
-                bot_token=TG_BOT_TOKEN
+                bot_token=TG_BOT_TOKEN,
+                in_memory=True
             )
             
             msg_id = None
@@ -483,7 +489,7 @@ if original_video:
     original_filename = os.path.basename(original_video)
     clean_video = os.path.join(TEMP_SUB_DIR, original_filename)
     
-    # 🔥 DUAL-AUDIO SMART LOGIC
+    # 🔥 DUAL-AUDIO SMART LOGIC (Language Code + Title Check)
     try:
         probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index:stream_tags=language:stream_tags=title', '-of', 'json', original_video]
         probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -500,9 +506,12 @@ if original_video:
                 lang = s.get('tags', {}).get('language', '').lower()
                 title = s.get('tags', {}).get('title', '').lower()
                 
+                # 🔥 ජැපනීස් ද කියලා බලනවා
                 if lang in ['ja', 'jpn', 'japanese'] or 'japanese' in title or '日本語' in title or 'nihongo' in title:
                     jpn_index = s['index']
                     break
+                
+                # English නෙවෙයි නම් ඒකත් අරන් තියාගන්නවා (Fallback)
                 if lang not in ['en', 'eng', 'english'] and 'english' not in title and non_eng_index is None:
                     non_eng_index = s['index']
             
