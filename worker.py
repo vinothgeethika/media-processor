@@ -13,7 +13,7 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 import urllib.parse
 import concurrent.futures
-import random  
+import random
 from deep_translator import GoogleTranslator
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
@@ -64,7 +64,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V17 BOT-1 FIREBASE CACHE NO-FLOOD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V18 BOT-1 PYROGRAM IN-MEMORY NO-FLOOD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -193,7 +193,7 @@ def download_video():
     return None
 
 def extract_and_score_subtitles(video_path):
-    print("🔍 Scanning video for softsubs and calculating scores...", flush=True)
+    print("🔍 Scanning video for softsubs...", flush=True)
     eng_sub_path = os.path.join(TEMP_SUB_DIR, "extracted.srt")
     
     cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index:stream_tags=language:stream_tags=title', '-of', 'json', video_path]
@@ -370,37 +370,6 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     except Exception: pass
 
 # ==========================================
-# 🚀 TELEGRAM SESSION CACHING (FIREBASE)
-# ==========================================
-def get_pyrogram_session():
-    doc_ref = fs_db.collection('bot_config').document('pyrogram_session')
-    doc = doc_ref.get()
-    if doc.exists and doc.to_dict().get('session_string'):
-        return doc.to_dict().get('session_string')
-    
-    # ⏳ එකපාර මැෂින් ගොඩක් Start වුණොත් එන අවුල නවත්තන්න Random Delay එකක්
-    sleep_t = random.randint(1, 20)
-    print(f"⏳ Session not found! Waiting {sleep_t}s to prevent race conditions...", flush=True)
-    time.sleep(sleep_t)
-    
-    doc = doc_ref.get()
-    if doc.exists and doc.to_dict().get('session_string'):
-        return doc.to_dict().get('session_string')
-        
-    print("⚠️ Creating a new Pyrogram session and saving to Firebase...", flush=True)
-    try:
-        from pyrogram import Client
-        temp_app = Client("temp_maker", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN, in_memory=True)
-        with temp_app:
-            session_str = temp_app.export_session_string()
-            doc_ref.set({'session_string': session_str})
-            print("✅ New Pyrogram session saved to Firebase!", flush=True)
-            return session_str
-    except Exception as e:
-        print(f"❌ Failed to create session: {e}", flush=True)
-        return None
-
-# ==========================================
 # 🚀 TELEGRAM UPLOAD FUNCTION (PYROGRAM)
 # ==========================================
 def upload_to_telegram(video_path, srt_path):
@@ -410,7 +379,10 @@ def upload_to_telegram(video_path, srt_path):
         
     print("📤 Connecting to Telegram Database Channel via Pyrogram...", flush=True)
     
-    session_string = get_pyrogram_session()
+    # 🔥 මැෂින් කිහිපයක් එකපාර ලොග් වෙන එක වළක්වන්න Stagger Delay එකක් දැම්මා
+    sleep_time = random.randint(15, 120)
+    print(f"⏳ Sleeping for {sleep_time}s to avoid Telegram Flood Wait...", flush=True)
+    time.sleep(sleep_time)
     
     try:
         from pyrogram import Client
@@ -437,10 +409,14 @@ def upload_to_telegram(video_path, srt_path):
         for attempt in range(1, MAX_RETRIES + 1):
             print(f"\n🚀 Telegram Upload Attempt {attempt}/{MAX_RETRIES}...", flush=True)
             
-            if session_string:
-                app = Client("memory_upload", session_string=session_string, api_id=int(TG_API_ID), api_hash=TG_API_HASH, in_memory=True)
-            else:
-                app = Client("memory_upload", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN, in_memory=True)
+            # 🔥 අලුත්ම In-Memory Session එකක් හදනවා. Firebase Cache එක අයින් කළා.
+            app = Client(
+                f"mem_session_short_{ep_num}", 
+                api_id=int(TG_API_ID), 
+                api_hash=TG_API_HASH, 
+                bot_token=TG_BOT_TOKEN, 
+                in_memory=True
+            )
             
             msg_id = None
             try:
