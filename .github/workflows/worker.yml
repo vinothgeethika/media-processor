@@ -46,7 +46,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install google-api-core==2.34.0 requests firebase-admin pysubs2 deep-translator requests-toolbelt torrentool beautifulsoup4 python-dotenv faster-whisper chardet requests[socks] telethon
+          pip install google-api-core==2.34.0 requests firebase-admin pysubs2 deep-translator requests-toolbelt torrentool beautifulsoup4 python-dotenv faster-whisper chardet requests[socks] pyrogram tgcrypto
 
       - name: Create Firebase Service Account JSON
         env: 
