@@ -13,7 +13,6 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 import urllib.parse
 import concurrent.futures
-import random
 from deep_translator import GoogleTranslator
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
@@ -64,7 +63,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V18 BOT-1 PYROGRAM IN-MEMORY NO-FLOOD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V20 BOT-1 RTDB QUEUE NO-FLOOD] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -370,6 +369,54 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     except Exception: pass
 
 # ==========================================
+# 🚀 RTDB QUEUE & SESSION SYSTEM
+# ==========================================
+def acquire_upload_lock():
+    lock_ref = db.reference('bot_config/upload_lock')
+    print("\n⏳ Entering Telegram Upload Queue (Waiting for Lock via RTDB)...", flush=True)
+    while True:
+        data = lock_ref.get()
+        if data and data.get('is_locked') == True:
+            locked_time = data.get('locked_at', 0)
+            if time.time() - locked_time > 1500:
+                print("🔓 Lock seems stuck from a crash. Forcing unlock...", flush=True)
+                lock_ref.set({'is_locked': False, 'locked_at': 0})
+                continue
+            print("⏳ Another episode is currently uploading. Waiting in queue (15s)...", flush=True)
+            time.sleep(15)
+            continue
+        
+        lock_ref.set({'is_locked': True, 'locked_at': time.time()})
+        print("🔒 Lock Acquired via RTDB! It's our turn.", flush=True)
+        break
+
+def release_upload_lock():
+    try:
+        db.reference('bot_config/upload_lock').set({'is_locked': False, 'locked_at': 0})
+        print("🔓 Lock Released via RTDB!", flush=True)
+    except: pass
+
+def get_pyrogram_session():
+    session_ref = db.reference('bot_config/pyrogram_session')
+    session_str = session_ref.get()
+    
+    if session_str:
+        return session_str
+        
+    print("⚠️ Creating a NEW Pyrogram session and saving to RTDB...", flush=True)
+    try:
+        from pyrogram import Client
+        temp_app = Client("temp_maker", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN, in_memory=True)
+        with temp_app:
+            new_session_str = temp_app.export_session_string()
+            session_ref.set(new_session_str)
+            print("✅ New Pyrogram session saved to RTDB!", flush=True)
+            return new_session_str
+    except Exception as e:
+        print(f"❌ Failed to create session: {e}", flush=True)
+        return None
+
+# ==========================================
 # 🚀 TELEGRAM UPLOAD FUNCTION (PYROGRAM)
 # ==========================================
 def upload_to_telegram(video_path, srt_path):
@@ -379,12 +426,13 @@ def upload_to_telegram(video_path, srt_path):
         
     print("📤 Connecting to Telegram Database Channel via Pyrogram...", flush=True)
     
-    # 🔥 මැෂින් කිහිපයක් එකපාර ලොග් වෙන එක වළක්වන්න Stagger Delay එකක් දැම්මා
-    sleep_time = random.randint(15, 120)
-    print(f"⏳ Sleeping for {sleep_time}s to avoid Telegram Flood Wait...", flush=True)
-    time.sleep(sleep_time)
+    acquire_upload_lock() # 🔥 RTDB එකෙන් පෝලිමේ ඉන්නවා
     
     try:
+        session_string = get_pyrogram_session() 
+        if not session_string:
+            return None
+            
         from pyrogram import Client
         
         caption = f"🎬 **{safe_anime_title} - Episode {ep_num}**"
@@ -404,60 +452,46 @@ def upload_to_telegram(video_path, srt_path):
                 print(f"   📈 Pyrogram Upload Progress: {percent}%", flush=True)
                 last_printed_percent[0] = percent
 
-        MAX_RETRIES = 3
+        app = Client("memory_upload", session_string=session_string, api_id=int(TG_API_ID), api_hash=TG_API_HASH, in_memory=True)
         
-        for attempt in range(1, MAX_RETRIES + 1):
-            print(f"\n🚀 Telegram Upload Attempt {attempt}/{MAX_RETRIES}...", flush=True)
-            
-            # 🔥 අලුත්ම In-Memory Session එකක් හදනවා. Firebase Cache එක අයින් කළා.
-            app = Client(
-                f"mem_session_short_{ep_num}", 
-                api_id=int(TG_API_ID), 
-                api_hash=TG_API_HASH, 
-                bot_token=TG_BOT_TOKEN, 
-                in_memory=True
-            )
-            
-            msg_id = None
-            try:
-                with app:
-                    last_printed_percent[0] = -1 
-                    
-                    print("🚀 Uploading Video File...", flush=True)
-                    msg = app.send_document(
-                        chat_id=target_chat,
-                        document=video_path,
-                        caption=caption,
-                        force_document=False,
-                        progress=progress
-                    )
-                    
-                    if msg and srt_path and os.path.exists(srt_path):
-                        print("🚀 Uploading Subtitle File...", flush=True)
-                        app.send_document(
-                            chat_id=target_chat,
-                            document=srt_path,
-                            reply_to_message_id=msg.id
-                        )
-                    msg_id = msg.id
-                    
-            except Exception as e:
-                print(f"❌ Pyrogram Upload Error: {e}", flush=True)
-            
-            if msg_id:
-                print(f"✅ Telegram Upload Success! Message ID: {msg_id}", flush=True)
-                return msg_id
-            
-            if attempt < MAX_RETRIES:
-                print("🔄 Retrying in 10 seconds...", flush=True)
-                time.sleep(10)
+        msg_id = None
+        try:
+            with app:
+                print("🚀 Uploading Video File...", flush=True)
+                msg = app.send_document(
+                    chat_id=target_chat,
+                    document=video_path,
+                    caption=caption,
+                    force_document=False,
+                    progress=progress
+                )
                 
-        print("❌ All upload attempts failed.", flush=True)
+                if msg and srt_path and os.path.exists(srt_path):
+                    print("🚀 Uploading Subtitle File...", flush=True)
+                    app.send_document(
+                        chat_id=target_chat,
+                        document=srt_path,
+                        reply_to_message_id=msg.id
+                    )
+                msg_id = msg.id
+                
+        except Exception as e:
+            if "AUTH" in str(e) or "Session" in str(e):
+                db.reference('bot_config/pyrogram_session').delete()
+                print("🗑️ Session deleted from RTDB due to auth error. Will recreate next time.", flush=True)
+            print(f"❌ Pyrogram Upload Error: {e}", flush=True)
+        
+        if msg_id:
+            print(f"✅ Telegram Upload Success! Message ID: {msg_id}", flush=True)
+            return msg_id
+            
         return None
             
     except Exception as e:
         print(f"❌ Critical Telegram Upload Error: {e}", flush=True)
         return None
+    finally:
+        release_upload_lock() # 🔥 කොහොම හරි අන්තිමට ලොක් එක අරිනවා
 
 # ==========================================
 # 💾 FIRESTORE UPDATE
@@ -488,7 +522,7 @@ if original_video:
     original_filename = os.path.basename(original_video)
     clean_video = os.path.join(TEMP_SUB_DIR, original_filename)
     
-    # 🔥 DUAL-AUDIO SMART LOGIC (Language Code + Title Check)
+    # 🔥 DUAL-AUDIO SMART LOGIC 
     try:
         probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index:stream_tags=language:stream_tags=title', '-of', 'json', original_video]
         probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -505,12 +539,10 @@ if original_video:
                 lang = s.get('tags', {}).get('language', '').lower()
                 title = s.get('tags', {}).get('title', '').lower()
                 
-                # 🔥 ජැපනීස් ද කියලා බලනවා
                 if lang in ['ja', 'jpn', 'japanese'] or 'japanese' in title or '日本語' in title or 'nihongo' in title:
                     jpn_index = s['index']
                     break
                 
-                # English නෙවෙයි නම් ඒකත් අරන් තියාගන්නවා (Fallback)
                 if lang not in ['en', 'eng', 'english'] and 'english' not in title and non_eng_index is None:
                     non_eng_index = s['index']
             
