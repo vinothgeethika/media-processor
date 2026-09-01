@@ -48,12 +48,6 @@ RTDB_WORKER_FEEDBACK = "worker_job_status_short"
 
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
-# Telegram Credentials
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
-TG_DB_CHANNEL_ID = os.environ.get("TG_DB_CHANNEL_ID")
-TG_API_ID = os.environ.get("TG_API_ID")
-TG_API_HASH = os.environ.get("TG_API_HASH")
-
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 anime_id = payload.get("anilist_id")
 ep_num = payload.get("episode")
@@ -63,7 +57,7 @@ search_type = payload.get("search_type")
 anime_title = payload.get("title", "Unknown Anime")
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V21 BOT-1 AUTO-RECOVER SESSION] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V21 BOT-1 ABYSS ONLY] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
@@ -370,123 +364,24 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
 
 
 # ==========================================
-# 🚀 SESSION CACHING SYSTEM
+# 💾 FIRESTORE UPDATE (Abyss Only)
 # ==========================================
-def get_pyrogram_session():
-    session_ref = db.reference('bot_config/pyrogram_session')
-    session_str = session_ref.get()
-    
-    if session_str:
-        return session_str
-        
-    print("⚠️ Session not found in DB! Creating a NEW Pyrogram session...", flush=True)
-    try:
-        from pyrogram import Client
-        temp_app = Client("temp_maker", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN, in_memory=True)
-        with temp_app:
-            new_session_str = temp_app.export_session_string()
-            session_ref.set(new_session_str)
-            print("✅ New session string generated and saved to DB!", flush=True)
-            return new_session_str
-    except Exception as e:
-        print(f"❌ Failed to create session: {e}", flush=True)
-        return None
-
-# ==========================================
-# 🚀 TELEGRAM UPLOAD FUNCTION (PYROGRAM)
-# ==========================================
-def upload_to_telegram(video_path, srt_path):
-    if not all([TG_BOT_TOKEN, TG_DB_CHANNEL_ID, TG_API_ID, TG_API_HASH]):
-        print("⚠️ Telegram credentials missing. Skipping Telegram upload.", flush=True)
-        return None
-        
-    print("📤 Connecting to Telegram Database Channel via Pyrogram...", flush=True)
-    
-    from pyrogram import Client
-    
-    caption = f"🎬 **{safe_anime_title} - Episode {ep_num}**"
-    target_chat_str = str(TG_DB_CHANNEL_ID).strip()
-    target_chat = target_chat_str if target_chat_str.startswith("@") else int(target_chat_str)
-    
-    last_printed_percent = [-1]
-    def progress(current, total):
-        percent = int((current / total) * 100)
-        if percent % 10 == 0 and percent != last_printed_percent[0]:
-            print(f"   📈 Pyrogram Upload Progress: {percent}%", flush=True)
-            last_printed_percent[0] = percent
-
-    MAX_RETRIES = 3
-    
-    for attempt in range(1, MAX_RETRIES + 1):
-        print(f"\n🚀 Telegram Upload Attempt {attempt}/{MAX_RETRIES}...", flush=True)
-        
-        session_string = get_pyrogram_session() 
-        if not session_string:
-            print("⚠️ Session generation failed. Retrying...", flush=True)
-            time.sleep(10)
-            continue
-            
-        app = Client("memory_upload", session_string=session_string, api_id=int(TG_API_ID), api_hash=TG_API_HASH, in_memory=True)
-        
-        msg_id = None
-        try:
-            with app:
-                print("🚀 Uploading Video File...", flush=True)
-                msg = app.send_document(
-                    chat_id=target_chat,
-                    document=video_path,
-                    caption=caption,
-                    force_document=False,
-                    progress=progress
-                )
-                
-                if msg and srt_path and os.path.exists(srt_path):
-                    print("🚀 Uploading Subtitle File...", flush=True)
-                    app.send_document(
-                        chat_id=target_chat,
-                        document=srt_path,
-                        reply_to_message_id=msg.id
-                    )
-                msg_id = msg.id
-                
-        except Exception as e:
-            error_text = str(e)
-            print(f"❌ Pyrogram Error: {error_text}", flush=True)
-            
-            # 🔥 අන්න මෙතන තමයි මැජික් එක!
-            # Error එක "AUTH_KEY_DUPLICATED" හෝ "406" නම්, ඩේටාබේස් එකේ තියෙන අවුල් ගිය Session එක මකලා දානවා.
-            # එතකොට ඊළඟ Retry Loop එකේදී අලුත්ම Session එකක් හැදෙනවා!
-            if "AUTH_KEY_DUPLICATED" in error_text or "406" in error_text or "AUTH" in error_text:
-                print("⚠️ Ghost Connection Detected! Deleting old session from DB to create a fresh one...", flush=True)
-                db.reference('bot_config/pyrogram_session').delete()
-        
-        if msg_id:
-            print(f"✅ Telegram Upload Success! Message ID: {msg_id}", flush=True)
-            return msg_id
-            
-        # ෆේල් වුණොත් තත්පර 10ක් ඉඳලා ඊළඟ Attempt එකට යනවා
-        time.sleep(10)
-        
-    print("❌ All upload attempts failed.", flush=True)
-    return None
-
-# ==========================================
-# 💾 FIRESTORE UPDATE
-# ==========================================
-def update_database(file_code, tg_msg_id=None):
-    print("💾 Updating Firestore...", flush=True)
+def update_database(file_code):
+    print("💾 Updating Firestore with Abyss link...", flush=True)
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
-    deep_link_id = f"{anime_id}-{ep_num}"
     
     data = {
         'status': 'uploaded',
-        'links': {'abyss_video_id': file_code, 'abyss_embed': f"https://abyss.to/embed/{file_code}"},
+        'links': {
+            'abyss_video_id': file_code, 
+            'abyss_embed': f"https://abyss.to/embed/{file_code}"
+        },
         'last_updated': firestore.SERVER_TIMESTAMP
     }
-    if tg_msg_id:
-        data['telegram'] = {'message_id': tg_msg_id, 'deep_link_id': deep_link_id}
-        
+    
+    # Telegram Data එක අයින් කරලා, merge=True දාලා අප්ඩේට් කරනවා (පරණ ඩේටා තියෙනව නම් මැකෙන්නේ නෑ)
     fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set(data, merge=True)
+    print("✅ Firestore Updated!", flush=True)
 
 # --- MAIN EXECUTION ---
 original_video = download_video()
@@ -539,26 +434,22 @@ if original_video:
         print(f"⚠️ Audio parsing failed, falling back to basic cleanup...", flush=True)
         subprocess.run(['ffmpeg', '-i', original_video, '-c', 'copy', '-sn', clean_video, '-y'], stderr=subprocess.DEVNULL)
     
+    # වීඩියෝ එක Abyss එකට අප්ලෝඩ් කිරීම
     video_to_upload = clean_video if os.path.exists(clean_video) else original_video
     upload_result = upload_video_to_abyss(video_to_upload)
     
     if upload_result and upload_result[0]:
         file_code, file_size = upload_result
+        
+        # සබ් එක Abyss එකට ඇටෑච් කිරීම
         if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
             upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
             
-        tg_msg_id = None
-        if TG_BOT_TOKEN and TG_DB_CHANNEL_ID:
-            tg_msg_id = upload_to_telegram(video_to_upload, srt_sub_path)
-            
-        if TG_BOT_TOKEN and TG_DB_CHANNEL_ID and not tg_msg_id:
-            print("❌ Workflow Failed due to Telegram Upload Timeout or Error.", flush=True)
-            notify_status("failed", 0)
-            sys.exit(1)
-            
-        update_database(file_code, tg_msg_id)
+        # Database එක අප්ඩේට් කිරීම
+        update_database(file_code)
+        
         notify_status("success", file_size)
-        print("🎉 WORKER COMPLETED SUCCESSFULLY!", flush=True)
+        print("🎉 WORKER COMPLETED SUCCESSFULLY (Abyss Upload Only)!", flush=True)
         sys.exit(0)
     else:
         print("❌ Video Upload Failed!", flush=True)
