@@ -66,12 +66,28 @@ os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 
 def notify_status(status="failed", file_size=0):
     try:
-        db.reference(RTDB_WORKER_FEEDBACK).set({
-            "status": status, "anilist_id": str(anime_id),
-            "episode": int(ep_num), "file_size": file_size,
+        job_key = f"{anime_id}_ep_{ep_num}"
+        fb_data = {
+            "status": status,
+            "anilist_id": str(anime_id),
+            "episode": int(ep_num),
+            "file_size": file_size,
+            "job_type": job_type,
+            "job_key": payload.get("job_key"),
+            "timestamp": time.time()
+        }
+        # 1. Per-episode child key so multiple concurrent workers never overwrite each other
+        db.reference(RTDB_WORKER_FEEDBACK).child(job_key).set(fb_data)
+        # 2. Update root for compatibility
+        db.reference(RTDB_WORKER_FEEDBACK).update({
+            "status": status,
+            "anilist_id": str(anime_id),
+            "episode": int(ep_num),
+            "file_size": file_size,
             "timestamp": time.time()
         })
     except: pass
+
 
 def extract_ep_number(filename):
     clean = re.sub(r'\[.*?\]|\(.*?\)', ' ', filename.lower())
