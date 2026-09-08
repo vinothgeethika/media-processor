@@ -39,14 +39,8 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DB_URL})
 fs_db = firestore.client()
 
-ABYSS_API_KEY = os.environ.get("ABYSS_API_KEY", "")
-ABYSS_EMAIL = os.environ.get("ABYSS_EMAIL", "")       
-ABYSS_PASSWORD = os.environ.get("ABYSS_PASSWORD", "") 
-
 # Bot 1 Database Node
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
-
-ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 anime_id = payload.get("anilist_id")
@@ -54,38 +48,67 @@ ep_num = payload.get("episode")
 magnet = payload.get("magnet")
 job_type = payload.get("job_type")
 search_type = payload.get("search_type")
+category = payload.get("category", "tv")
 anime_title = payload.get("title", "Unknown Anime")
 
+# Dynamic Abyss account credentials with env fallback
+ABYSS_API_KEY = payload.get("abyss_api_key") or os.environ.get("ABYSS_API_KEY", "")
+ABYSS_EMAIL = payload.get("abyss_email") or os.environ.get("ABYSS_EMAIL", "")       
+ABYSS_PASSWORD = payload.get("abyss_password") or os.environ.get("ABYSS_PASSWORD", "") 
+ABYSS_ACCOUNT_NAME = payload.get("abyss_account_name", "Default")
+ABYSS_ACCOUNT_ID = payload.get("abyss_account_id", "")
+
+DEDICATED_RTDB_URL = payload.get("rtdb_url") or os.environ.get("FIREBASE_DB_URL", "https://anihsift-sever-2-default-rtdb.firebaseio.com")
+ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
+
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
-print(f"🚀 [WORKER STARTED - V21 BOT-1 ABYSS ONLY] Anime: {safe_anime_title} | Ep: {ep_num}", flush=True)
+print(f"🚀 [WORKER STARTED - V21 BOT-1 ABYSS ONLY] Anime: {safe_anime_title} | Ep: {ep_num} | Account: {ABYSS_ACCOUNT_NAME}", flush=True)
 
 BASE_DIR = "downloads"
 TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 
-def notify_status(status="failed", file_size=0):
+def notify_status(status="failed", file_size=0, file_code=None):
     try:
-        job_key = f"{anime_id}_ep_{ep_num}"
+        p_key = payload.get("job_key")
+        job_key = p_key if p_key else f"{anime_id}_ep_{ep_num}"
         fb_data = {
             "status": status,
             "anilist_id": str(anime_id),
             "episode": int(ep_num),
             "file_size": file_size,
+            "file_code": file_code,
+            "video_id": file_code,
             "job_type": job_type,
-            "job_key": payload.get("job_key"),
+            "job_key": job_key,
+            "account_id": ABYSS_ACCOUNT_ID,
+            "account_name": ABYSS_ACCOUNT_NAME,
             "timestamp": time.time()
         }
-        # 1. Per-episode child key so multiple concurrent workers never overwrite each other
-        db.reference(RTDB_WORKER_FEEDBACK).child(job_key).set(fb_data)
-        # 2. Update root for compatibility
-        db.reference(RTDB_WORKER_FEEDBACK).update({
-            "status": status,
-            "anilist_id": str(anime_id),
-            "episode": int(ep_num),
-            "file_size": file_size,
-            "timestamp": time.time()
-        })
+        # 1. Direct REST PUT to Dedicated RTDB (0% Firestore reads, high reliability)
+        if DEDICATED_RTDB_URL:
+            try:
+                clean_url = DEDICATED_RTDB_URL.rstrip('/')
+                requests.put(f"{clean_url}/worker_feedback/{job_key}.json", json=fb_data, timeout=5)
+                fallback_key = f"{anime_id}_ep_{ep_num}"
+                if job_key != fallback_key:
+                    requests.put(f"{clean_url}/worker_feedback/{fallback_key}.json", json=fb_data, timeout=5)
+                requests.put(f"{clean_url}/worker_job_status_short/{job_key}.json", json=fb_data, timeout=5)
+            except Exception: pass
+
+        # 2. Legacy firebase_admin SDK update if available
+        try:
+            db.reference(RTDB_WORKER_FEEDBACK).child(job_key).set(fb_data)
+            db.reference(RTDB_WORKER_FEEDBACK).update({
+                "status": status,
+                "anilist_id": str(anime_id),
+                "episode": int(ep_num),
+                "file_size": file_size,
+                "file_code": file_code,
+                "timestamp": time.time()
+            })
+        except Exception: pass
     except: pass
 
 
@@ -392,12 +415,35 @@ def update_database(file_code):
             'abyss_video_id': file_code, 
             'abyss_embed': f"https://abyss.to/embed/{file_code}"
         },
+        'server_3_uploaded': True,
         'last_updated': firestore.SERVER_TIMESTAMP
     }
     
-    # Telegram Data එක අයින් කරලා, merge=True දාලා අප්ඩේට් කරනවා (පරණ ඩේටා තියෙනව නම් මැකෙන්නේ නෑ)
-    fs_db.collection('anime_series').document(str(anime_id)).collection('episodes').document(ep_doc_id).set(data, merge=True)
-    print("✅ Firestore Updated!", flush=True)
+    col_name = 'anime_movies' if (category == 'movie' or job_type == 'movie') else 'anime_series'
+    try:
+        fs_db.collection(col_name).document(str(anime_id)).collection('episodes').document(ep_doc_id).set(data, merge=True)
+        print(f"✅ Firestore Updated in {col_name}!", flush=True)
+    except Exception as e:
+        print(f"⚠️ Firestore update error: {e}", flush=True)
+
+def cleanup_temp_files():
+    print("🧹 Cleaning up downloaded video and temporary files to free disk space...", flush=True)
+    import shutil
+    try:
+        if os.path.exists(BASE_DIR):
+            shutil.rmtree(BASE_DIR, ignore_errors=True)
+            os.makedirs(BASE_DIR, exist_ok=True)
+    except Exception: pass
+
+    try:
+        if os.path.exists(TEMP_SUB_DIR):
+            shutil.rmtree(TEMP_SUB_DIR, ignore_errors=True)
+    except Exception: pass
+
+    for ext in ("*.torrent", "*.mkv", "*.mp4", "*.srt", "*.vtt", "*.mp3", "*.aria2"):
+        for f in glob.glob(ext):
+            try: os.remove(f)
+            except Exception: pass
 
 # --- MAIN EXECUTION ---
 original_video = download_video()
@@ -464,14 +510,18 @@ if original_video:
         # Database එක අප්ඩේට් කිරීම
         update_database(file_code)
         
-        notify_status("success", file_size)
+        notify_status("success", file_size, file_code=file_code)
         print("🎉 WORKER COMPLETED SUCCESSFULLY (Abyss Upload Only)!", flush=True)
+        cleanup_temp_files()
         sys.exit(0)
     else:
         print("❌ Video Upload Failed!", flush=True)
         notify_status("failed", 0)
+        cleanup_temp_files()
         sys.exit(1)
 else:
     print("❌ Download Failed!", flush=True)
     notify_status("failed", 0)
+    cleanup_temp_files()
     sys.exit(1)
+
