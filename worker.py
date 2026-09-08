@@ -52,13 +52,14 @@ category = payload.get("category", "tv")
 anime_title = payload.get("title", "Unknown Anime")
 
 # Dynamic Abyss account credentials with env fallback
-ABYSS_API_KEY = payload.get("abyss_api_key") or os.environ.get("ABYSS_API_KEY", "")
-ABYSS_EMAIL = payload.get("abyss_email") or os.environ.get("ABYSS_EMAIL", "")       
-ABYSS_PASSWORD = payload.get("abyss_password") or os.environ.get("ABYSS_PASSWORD", "") 
-ABYSS_ACCOUNT_NAME = payload.get("abyss_account_name", "Default")
-ABYSS_ACCOUNT_ID = payload.get("abyss_account_id", "")
+abyss_obj = payload.get("abyss") or {}
+ABYSS_API_KEY = payload.get("abyss_api_key") or abyss_obj.get("key") or os.environ.get("ABYSS_API_KEY", "")
+ABYSS_EMAIL = payload.get("abyss_email") or abyss_obj.get("email") or os.environ.get("ABYSS_EMAIL", "")       
+ABYSS_PASSWORD = payload.get("abyss_password") or abyss_obj.get("password") or os.environ.get("ABYSS_PASSWORD", "") 
+ABYSS_ACCOUNT_NAME = payload.get("abyss_account_name") or abyss_obj.get("name", "Default")
+ABYSS_ACCOUNT_ID = payload.get("abyss_account_id") or abyss_obj.get("id", "")
 
-DEDICATED_RTDB_URL = payload.get("rtdb_url") or os.environ.get("FIREBASE_DB_URL", "https://anihsift-sever-2-default-rtdb.firebaseio.com")
+DEDICATED_RTDB_URL = payload.get("rtdb_url") or abyss_obj.get("rtdb_url") or os.environ.get("FIREBASE_DB_URL", "https://anihsift-sever-2-default-rtdb.firebaseio.com")
 ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
