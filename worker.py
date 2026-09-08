@@ -120,9 +120,12 @@ def extract_ep_number(filename):
     if m: return int(m.group(1))
     m = re.search(r'\b(?:ep|episode)\.?\s?0*(\d+)\b', clean)
     if m: return int(m.group(1))
-    m = re.search(r'\s-\s0*(\d+)(?:v\d)?\b', clean)
+    m = re.search(r'(?:\s-\s|_|#\s?)0*(\d+)(?:v\d)?(?:\b|_)', clean)
     if m: return int(m.group(1))
-    m = re.search(r'\b0*(\d+)\b', clean)
+
+    clean_no_season = re.sub(r'\b(?:s|season|series)\s?\d+\b', ' ', clean, flags=re.IGNORECASE)
+    clean_no_season = re.sub(r'\b\d+(?:st|nd|rd|th)\s?season\b', ' ', clean_no_season, flags=re.IGNORECASE)
+    m = re.search(r'\b0*(\d+)\b', clean_no_season)
     if m: return int(m.group(1))
     return None
 
@@ -414,8 +417,10 @@ def update_database(file_code):
         'status': 'uploaded',
         'links': {
             'abyss_video_id': file_code, 
-            'abyss_embed': f"https://abyss.to/embed/{file_code}"
+            'abyss_embed': f"https://abyss.to/embed/{file_code}",
+            'account': ABYSS_ACCOUNT_NAME
         },
+        'account_name': ABYSS_ACCOUNT_NAME,
         'server_3_uploaded': True,
         'last_updated': firestore.SERVER_TIMESTAMP
     }
