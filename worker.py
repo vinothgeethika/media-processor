@@ -6,6 +6,7 @@ import requests
 import subprocess
 import glob
 import re
+import uuid
 import firebase_admin
 from firebase_admin import credentials, firestore, db
 import pysubs2
@@ -46,6 +47,17 @@ payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 anime_id = payload.get("anilist_id")
 ep_num = payload.get("episode")
 magnet = payload.get("magnet")
+raw_backups = payload.get("backup_magnets") or []
+if isinstance(raw_backups, str): raw_backups = [raw_backups]
+backup_magnets = [m.strip() for m in raw_backups if isinstance(m, str) and m.strip()]
+
+all_magnets = []
+if magnet and str(magnet).strip() and str(magnet).strip().upper() != "AUTO_TORRENT":
+    all_magnets.append(str(magnet).strip())
+for bm in backup_magnets:
+    if bm and bm not in all_magnets:
+        all_magnets.append(bm)
+
 job_type = payload.get("job_type")
 search_type = payload.get("search_type")
 category = payload.get("category", "tv")
@@ -65,8 +77,8 @@ ABYSS_UPLOAD_URL = f"https://up.abyss.to/{ABYSS_API_KEY}"
 safe_anime_title = re.sub(r'[\\/*?:"<>|]', "", anime_title).strip()
 print(f"🚀 [WORKER STARTED - V21 BOT-1 ABYSS ONLY] Anime: {safe_anime_title} | Ep: {ep_num} | Account: {ABYSS_ACCOUNT_NAME}", flush=True)
 
-BASE_DIR = "downloads"
-TEMP_SUB_DIR = f"temp_subs_ep_{ep_num}"
+BASE_DIR = f"downloads_{anime_id}_ep_{ep_num}_{uuid.uuid4().hex[:6]}"
+TEMP_SUB_DIR = f"temp_subs_{anime_id}_ep_{ep_num}_{uuid.uuid4().hex[:6]}"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TEMP_SUB_DIR, exist_ok=True)
 
@@ -199,33 +211,72 @@ def translate_guaranteed_sinhala(text):
     return ""
 
 def download_video():
-    print(f"📥 Starting Download...", flush=True)
+    print(f"📥 Starting Download (Total Magnets Available: {len(all_magnets)})...", flush=True)
     timeout_arg = '--bt-stop-timeout=300'
-    
-    if search_type == "BATCH":
-        subprocess.run(['aria2c', '--bt-metadata-only=true', '--bt-save-metadata=true', '--seed-time=0', '--bt-stop-timeout=120', magnet])
-        torrent_files = glob.glob("*.torrent")
-        if torrent_files:
-            from torrentool.api import Torrent
-            my_torrent = Torrent.from_file(torrent_files[0])
-            target_idx = None
-            for idx, f in enumerate(my_torrent.files, start=1):
-                if f.name.lower().endswith(('.mkv', '.mp4')) and extract_ep_number(os.path.basename(f.name)) == int(ep_num):
-                    target_idx = idx
-                    break
-            if target_idx:
-                subprocess.run(['aria2c', '--seed-time=0', f'--select-file={target_idx}', f'--dir={BASE_DIR}', timeout_arg, torrent_files[0]])
-    else:
-        subprocess.run(['aria2c', '--seed-time=0', f'--dir={BASE_DIR}', timeout_arg, magnet])
-
     target_ep_int = int(ep_num)
-    for root, dirs, files in os.walk(BASE_DIR):
-        for f in files:
-            if f.endswith(('.mkv', '.mp4')) and extract_ep_number(f) == target_ep_int:
-                return os.path.join(root, f)
-    for root, dirs, files in os.walk(BASE_DIR):
-        for f in files:
-            if f.endswith(('.mkv', '.mp4')): return os.path.join(root, f)
+
+    for mag_idx, current_mag in enumerate(all_magnets, start=1):
+        mag_short = current_mag[:45] + "..." if len(current_mag) > 45 else current_mag
+        print(f"\n🧲 [Candidate {mag_idx}/{len(all_magnets)}] Checking: {mag_short}", flush=True)
+
+        # Clear existing torrent metadata files
+        for tf in glob.glob("*.torrent"):
+            try: os.remove(tf)
+            except: pass
+
+        is_batch_mag = (search_type == "BATCH" or "batch" in current_mag.lower() or len(all_magnets) > 1)
+        if is_batch_mag:
+            print(f"🔍 Fetching metadata for Ep {ep_num} from magnet #{mag_idx}...", flush=True)
+            subprocess.run(['aria2c', '--bt-metadata-only=true', '--bt-save-metadata=true', '--seed-time=0', '--bt-stop-timeout=90', current_mag])
+            torrent_files = glob.glob("*.torrent")
+            if torrent_files:
+                from torrentool.api import Torrent
+                try:
+                    my_torrent = Torrent.from_file(torrent_files[0])
+                    target_idx = None
+                    for idx, f in enumerate(my_torrent.files, start=1):
+                        fname = os.path.basename(f.name)
+                        if fname.lower().endswith(('.mkv', '.mp4')) and extract_ep_number(fname) == target_ep_int:
+                            target_idx = idx
+                            print(f"🎯 Found Episode {ep_num} in magnet #{mag_idx} (File #{idx}: {fname})", flush=True)
+                            break
+
+                    if target_idx:
+                        print(f"⬇️ Downloading Ep {ep_num} using aria2c (File #{target_idx})...", flush=True)
+                        subprocess.run(['aria2c', '--seed-time=0', f'--select-file={target_idx}', f'--dir={BASE_DIR}', timeout_arg, torrent_files[0]])
+                        
+                        # Verify file was downloaded
+                        for root, dirs, files in os.walk(BASE_DIR):
+                            for f in files:
+                                if f.endswith(('.mkv', '.mp4')) and extract_ep_number(f) == target_ep_int:
+                                    print(f"✅ Successfully downloaded Ep {ep_num} from magnet #{mag_idx}!", flush=True)
+                                    return os.path.join(root, f)
+                        for root, dirs, files in os.walk(BASE_DIR):
+                            for f in files:
+                                if f.endswith(('.mkv', '.mp4')):
+                                    return os.path.join(root, f)
+                        print(f"⚠️ Aria2 download did not yield Ep {ep_num}. Trying next magnet...", flush=True)
+                    else:
+                        print(f"⚠️ Episode {ep_num} not in torrent #{mag_idx}. Trying next backup magnet...", flush=True)
+                except Exception as e_tor:
+                    print(f"⚠️ Error parsing torrent metadata for #{mag_idx}: {e_tor}. Trying next magnet...", flush=True)
+            else:
+                print(f"⚠️ Metadata download timed out/failed for magnet #{mag_idx}. Trying next magnet...", flush=True)
+        else:
+            # Single episode download attempt
+            subprocess.run(['aria2c', '--seed-time=0', f'--dir={BASE_DIR}', timeout_arg, current_mag])
+            for root, dirs, files in os.walk(BASE_DIR):
+                for f in files:
+                    if f.endswith(('.mkv', '.mp4')) and extract_ep_number(f) == target_ep_int:
+                        print(f"✅ Successfully downloaded Ep {ep_num} from single magnet #{mag_idx}!", flush=True)
+                        return os.path.join(root, f)
+            for root, dirs, files in os.walk(BASE_DIR):
+                for f in files:
+                    if f.endswith(('.mkv', '.mp4')):
+                        return os.path.join(root, f)
+            print(f"⚠️ Single download failed for Ep {ep_num}. Trying next magnet...", flush=True)
+
+    print(f"❌ Exhausted all {len(all_magnets)} magnets. Episode {ep_num} could not be downloaded.", flush=True)
     return None
 
 def extract_and_score_subtitles(video_path):
@@ -438,18 +489,12 @@ def cleanup_temp_files():
     try:
         if os.path.exists(BASE_DIR):
             shutil.rmtree(BASE_DIR, ignore_errors=True)
-            os.makedirs(BASE_DIR, exist_ok=True)
     except Exception: pass
 
     try:
         if os.path.exists(TEMP_SUB_DIR):
             shutil.rmtree(TEMP_SUB_DIR, ignore_errors=True)
     except Exception: pass
-
-    for ext in ("*.torrent", "*.mkv", "*.mp4", "*.srt", "*.vtt", "*.mp3", "*.aria2"):
-        for f in glob.glob(ext):
-            try: os.remove(f)
-            except Exception: pass
 
 # --- MAIN EXECUTION ---
 original_video = download_video()
