@@ -157,28 +157,30 @@ def clean_vtt_tags(text):
     text = re.sub(r'\{.*?\}', '', text).replace('\\h', ' ').replace('\\N', ' ').replace('\\n', ' ')
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'[♪♫♩♬]+', '', text)
+    # Strip Unicode directional embedding marks (RTL marks from Arabic ASS subtitles)
+    text = re.sub(r'[\u200e\u200f\u202a-\u202e\ufeff]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
+
+def has_letters(text):
+    if not text: return False
+    cl = clean_vtt_tags(text)
+    return any(c.isalpha() for c in cl)
 
 def is_garbage_sub(text):
     if not text: return True
-    # Strip ASS tags {...} and HTML tags <...>
-    cl = re.sub(r'<[^>]+>', '', re.sub(r'\{.*?\}', '', str(text))).replace('\\h', ' ').replace('\\N', ' ').replace('\\n', ' ').strip()
-    cl = re.sub(r'[♪♫♩♬]+', '', cl).strip()
+    cl = clean_vtt_tags(text)
     if not cl:
         return True  # Empty or only contained styling/notes
     # Detect ASS drawing mode / vector shapes (e.g. m 0 0 l 10 10...)
     if re.match(r'^m\s+-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+(?:l|b|s|c|m)\s+', cl):
         return True
-    # Check if there is actual dialogue text (letters or digits in any supported script)
-    if not re.search(r'[a-zA-Z0-9\u0D80-\u0DFF\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', cl):
+    # Check if there is actual dialogue text (letters or digits in any human language/script)
+    if not any(c.isalnum() for c in cl):
         return True
     return False
 
 def has_sinhala_characters(text):
     return bool(re.search(r'[\u0D80-\u0DFF]', str(text)))
-
-def has_letters(text):
-    return bool(re.search(r'[a-zA-Z\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', str(text)))
 
 WARP_PROXIES = {
     "http": "socks5://127.0.0.1:40000",
