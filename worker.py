@@ -14,6 +14,7 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 from faster_whisper import WhisperModel
 import urllib.parse
 import concurrent.futures
+import random
 from deep_translator import GoogleTranslator
 
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
@@ -184,39 +185,69 @@ WARP_PROXIES = {
     "https": "socks5://127.0.0.1:40000"
 }
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
+]
+
 def translate_guaranteed_sinhala(text):
     if not text or len(text.strip()) == 0: return ""
     if not has_letters(text): return text
 
-    for macro_attempt in range(2): 
-        for attempt in range(2):
-            try:
-                translator = GoogleTranslator(source='auto', target='si', proxies=WARP_PROXIES)
-                res = translator.translate(text)
-                if res and has_sinhala_characters(res):
-                    return apply_spoken_sinhala(res)
-            except Exception: time.sleep(1)
+    ua = random.choice(USER_AGENTS)
 
+    # Strategy 1: Chrome Extension API - Direct (Fastest, High Success Rate)
+    for attempt in range(2):
         try:
             url = "https://clients5.google.com/translate_a/t"
             params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
-            headers = {"User-Agent": "Mozilla/5.0"}
-            resp = requests.get(url, params=params, headers=headers, proxies=WARP_PROXIES, timeout=5)
+            headers = {"User-Agent": ua}
+            resp = requests.get(url, params=params, headers=headers, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 0:
                     res_text = str(data[0][0]) if isinstance(data[0], list) else str(data[0])
                     if res_text and has_sinhala_characters(res_text):
                         return apply_spoken_sinhala(res_text)
-        except: pass
+        except Exception:
+            pass
 
+    # Strategy 2: GoogleTranslator (deep-translator) Direct
+    for attempt in range(2):
         try:
             translator = GoogleTranslator(source='auto', target='si')
             res = translator.translate(text)
             if res and has_sinhala_characters(res):
                 return apply_spoken_sinhala(res)
-        except: pass
-        time.sleep(1)
+        except Exception:
+            time.sleep(0.2)
+
+    # Strategy 3: Chrome Extension API via WARP proxy
+    try:
+        url = "https://clients5.google.com/translate_a/t"
+        params = {"client": "dict-chrome-ex", "sl": "auto", "tl": "si", "q": text}
+        headers = {"User-Agent": ua}
+        resp = requests.get(url, params=params, headers=headers, proxies=WARP_PROXIES, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                res_text = str(data[0][0]) if isinstance(data[0], list) else str(data[0])
+                if res_text and has_sinhala_characters(res_text):
+                    return apply_spoken_sinhala(res_text)
+    except Exception:
+        pass
+
+    # Strategy 4: GoogleTranslator via WARP proxy
+    try:
+        translator = GoogleTranslator(source='auto', target='si', proxies=WARP_PROXIES)
+        res = translator.translate(text)
+        if res and has_sinhala_characters(res):
+            return apply_spoken_sinhala(res)
+    except Exception:
+        pass
 
     return ""
 
@@ -290,52 +321,147 @@ def download_video():
     return None
 
 def extract_and_score_subtitles(video_path):
+    """
+    Scans and extracts all soft subtitle tracks from MKV/MP4 using ffprobe & ffmpeg with '-c:s srt'.
+    Scores tracks using language, title, and line count.
+    Penalizes Signs & Songs, Romaji, and non-dialogue tracks.
+    Returns: (winner_type, winner_sub_path) where winner_type is 'sinhala' or 'english' (or (None, None))
+    """
     print("🔍 Scanning video for softsubs...", flush=True)
-    eng_sub_path = os.path.join(TEMP_SUB_DIR, "extracted.srt")
     
-    cmd = ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index:stream_tags=language:stream_tags=title', '-of', 'json', video_path]
+    probe_cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 's',
+        '-show_entries', 'stream=index:stream_tags=language,title',
+        '-of', 'json', video_path
+    ]
     
+    streams = []
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        streams = json.loads(result.stdout).get('streams', [])
-        if not streams: return None
+        result = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
+        if result.returncode == 0:
+            streams = json.loads(result.stdout).get('streams', [])
+    except Exception as e:
+        print(f"⚠️ ffprobe subtitle scan error: {e}", flush=True)
 
-        valid_subs_data = []
-        for s in streams:
-            idx = s['index']
-            lang = s.get('tags', {}).get('language', '').lower()
-            title = s.get('tags', {}).get('title', '').lower()
-            
-            temp_sub = os.path.join(TEMP_SUB_DIR, f"temp_track_{idx}.srt")
-            subprocess.run(['ffmpeg', '-i', video_path, '-map', f'0:{idx}', temp_sub, '-y'], stderr=subprocess.DEVNULL)
-            
-            if os.path.exists(temp_sub) and os.path.getsize(temp_sub) > 100:
-                try:
-                    try: subs = pysubs2.load(temp_sub, encoding='utf-8')
-                    except: subs = pysubs2.load(temp_sub, encoding='latin-1')
-                        
-                    line_count = len(subs.events)
-                    score = line_count
-                    if line_count >= 150:
-                        if lang == 'en' or 'eng' in title or 'english' in title: score += 100000 
-                        elif lang == 'ja' or 'jap' in title or 'romaji' in title: score -= 100000 
-                    else: score -= 50000 
-                        
-                    valid_subs_data.append({'index': idx, 'path': temp_sub, 'lines': line_count, 'score': score, 'name': title})
-                except Exception: pass
+    # Fallback if ffprobe returned no streams: try first 6 subtitle streams by index selector
+    if not streams:
+        streams = [{'index': f"s:{i}", 'tags': {'title': f"Track {i}"}} for i in range(6)]
 
-        if valid_subs_data:
-            valid_subs_data.sort(key=lambda x: x['score'], reverse=True)
-            best_sub = valid_subs_data[0]
-            if best_sub['lines'] >= 150:
-                print(f"🏆 WINNER: Stream {best_sub['index']} ('{best_sub['name']}') with {best_sub['lines']} lines!", flush=True)
-                os.rename(best_sub['path'], eng_sub_path)
-                for loser in valid_subs_data[1:]:
-                    if os.path.exists(loser['path']): os.remove(loser['path'])
-                return eng_sub_path
-                
-    except Exception: pass
-    return None
+    si_candidates = []
+    other_candidates = []
+
+    for s_idx_num, s in enumerate(streams):
+        s_idx = s.get('index', f"s:{s_idx_num}")
+        tags = s.get('tags', {}) or {}
+        lang = str(tags.get('language', '')).lower()
+        title = str(tags.get('title', f"Track {s_idx}")).lower()
+        
+        temp_sub = os.path.join(TEMP_SUB_DIR, f"temp_track_{s_idx_num}.srt")
+        
+        # Mapping strategy 1: stream index 0:{s_idx} with -c:s srt
+        map_arg = f"0:{s_idx}" if (str(s_idx).startswith('s:') or ':' in str(s_idx)) else f"0:{s_idx}"
+        cmd = ['ffmpeg', '-y', '-i', video_path, '-map', map_arg, '-c:s', 'srt', temp_sub]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40)
+        except Exception:
+            pass
+
+        # Mapping strategy 2 (fallback): subtitle stream selector 0:s:{s_idx_num}
+        if (not os.path.exists(temp_sub) or os.path.getsize(temp_sub) < 100) and not str(s_idx).startswith('s:'):
+            cmd_alt = ['ffmpeg', '-y', '-i', video_path, '-map', f'0:s:{s_idx_num}', '-c:s', 'srt', temp_sub]
+            try:
+                subprocess.run(cmd_alt, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40)
+            except Exception:
+                pass
+
+        if not os.path.exists(temp_sub) or os.path.getsize(temp_sub) < 100:
+            continue
+
+        try:
+            enc = detect_encoding(temp_sub)
+            try: subs = pysubs2.load(temp_sub, encoding=enc)
+            except Exception: subs = pysubs2.load(temp_sub, encoding='latin-1')
+
+            line_count = len(subs.events)
+            if line_count < 15: # Ignore micro-stubs or empty tracks
+                if os.path.exists(temp_sub): os.remove(temp_sub)
+                continue
+
+            score = line_count
+            name_combined = f"{title} {lang}"
+
+            # 1. Existing Sinhala Subtitle in video (highest priority)
+            if any(x in name_combined for x in ['si', 'sinhala', 'සිංහල']) or lang in ['si', 'sin']:
+                score += 200000
+            # 2. English Dialogue Track
+            elif any(x in name_combined for x in ['en', 'eng', 'english']) or lang in ['en', 'eng']:
+                score += 100000
+            else:
+                score += 10000 # Valid other dialogue track (French, Spanish, etc.)
+
+            # 3. Penalize Signs & Songs, lyrics, commentary, forced
+            if any(x in title for x in ['sign', 'song', 'forced', 'credit', 'op/ed', 'oped']):
+                score -= 100000
+            # 4. Penalize Japanese / Romaji
+            if any(x in name_combined for x in ['ja', 'jap', 'romaji']) or lang in ['ja', 'jpn']:
+                score -= 100000
+
+            # Line threshold scoring: dialogue tracks usually have >= 40 lines
+            if line_count < 40:
+                score -= 40000
+
+            print(f"   📄 Sub Track #{s_idx_num} ('{title}') | Lang: {lang or 'N/A'} | Lines: {line_count} | Score: {score}", flush=True)
+
+            if score <= 0:
+                if os.path.exists(temp_sub): os.remove(temp_sub)
+                continue
+
+            track_info = {
+                'path': temp_sub,
+                'lines': line_count,
+                'score': score,
+                'name': title,
+                'lang': lang
+            }
+
+            if any(x in name_combined for x in ['si', 'sinhala', 'සිංහල']) or lang in ['si', 'sin']:
+                si_candidates.append(track_info)
+            else:
+                other_candidates.append(track_info)
+
+        except Exception as e:
+            if os.path.exists(temp_sub):
+                try: os.remove(temp_sub)
+                except: pass
+
+    # 1. If an existing Sinhala sub is found, use it directly!
+    if si_candidates:
+        si_candidates.sort(key=lambda x: x['score'], reverse=True)
+        winner = si_candidates[0]
+        print(f"🏆 WINNER (Embedded Sinhala): Track '{winner['name']}' with {winner['lines']} lines!", flush=True)
+        winner_path = os.path.join(TEMP_SUB_DIR, "winner_sinhala.srt")
+        os.rename(winner['path'], winner_path)
+        for c in si_candidates[1:] + other_candidates:
+            if os.path.exists(c['path']):
+                try: os.remove(c['path'])
+                except: pass
+        return 'sinhala', winner_path
+
+    # 2. If translation source (English) is found, return it for translation!
+    if other_candidates:
+        other_candidates.sort(key=lambda x: x['score'], reverse=True)
+        winner = other_candidates[0]
+        print(f"🏆 WINNER (Translation Source): Track '{winner['name']}' with {winner['lines']} lines (Score: {winner['score']})!", flush=True)
+        winner_path = os.path.join(TEMP_SUB_DIR, "extracted.srt")
+        os.rename(winner['path'], winner_path)
+        for c in other_candidates[1:]:
+            if os.path.exists(c['path']):
+                try: os.remove(c['path'])
+                except: pass
+        return 'english', winner_path
+
+    return None, None
 
 def process_sinhala_sub(sub_path):
     out_name = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
@@ -344,12 +470,16 @@ def process_sinhala_sub(sub_path):
         try: subs = pysubs2.load(sub_path, encoding=detect_encoding(sub_path))
         except: subs = pysubs2.load(sub_path, encoding='latin-1')
         
-        cleaned_events, unique_texts, prev_text, seen_texts_count = [], set(), "", {}
+        cleaned_events = []
+        unique_texts = set()
+        prev_text = ""
+        seen_texts_count = {}
         bad_words = ['subtitle by', 'translated by', 'sync by', 'encoded by', 'www.', '.com', 'discord', 'telegram', 'netlify', 'anishift', 'download කිරීමට', 'නැරඹීමට']
         
         for e in subs:
             if is_garbage_sub(e.text): continue
-            txt, t_low = clean_vtt_tags(e.text), clean_vtt_tags(e.text).lower()
+            txt = clean_vtt_tags(e.text)
+            t_low = txt.lower()
             if any(x in t_low for x in bad_words) or len(txt) > 300 or not has_letters(txt): continue
             
             if txt == prev_text:
@@ -364,16 +494,23 @@ def process_sinhala_sub(sub_path):
             unique_texts.add(txt)
             prev_text = txt
             
-        if not cleaned_events: return None
+        if not cleaned_events:
+            print("⚠️ No events remaining after strict cleaning. Preserving base events.", flush=True)
+            cleaned_events = [e for e in subs if e.text and clean_vtt_tags(e.text)]
+            unique_texts = {clean_vtt_tags(e.text) for e in cleaned_events if has_letters(e.text)}
+            if not cleaned_events:
+                return None
         
         uni_list = list(unique_texts)
         total_lines = len(uni_list)
-        print(f"🚀 Translating {total_lines} lines (Strict Sinhala Mode ⚡)...", flush=True)
+        print(f"🚀 Translating {total_lines} unique lines (Guaranteed Sinhala Mode ⚡)...", flush=True)
         
         translation_map = {}
-        def process_single(text): return text, translate_guaranteed_sinhala(text)
+        def process_single(text):
+            return text, translate_guaranteed_sinhala(text)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        # Use 6 parallel workers to prevent Google 429 rate limit
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = [executor.submit(process_single, t) for t in uni_list]
             done_lines = 0
             for future in concurrent.futures.as_completed(futures):
@@ -381,48 +518,68 @@ def process_sinhala_sub(sub_path):
                 translation_map[orig] = trans
                 done_lines += 1
                 if done_lines % 25 == 0 or done_lines == total_lines:
-                    print(f"   📊 Progress: {int((done_lines/total_lines)*100)}%", flush=True)
+                    print(f"   📊 Progress: {int((done_lines/total_lines)*100)}% ({done_lines}/{total_lines})", flush=True)
                     
         final_events = []
+        translated_count = 0
         for event in cleaned_events: 
-            translated_text = translation_map.get(event.text, event.text)
-            if translated_text != "": 
+            translated_text = translation_map.get(event.text, "")
+            if translated_text: 
                 event.text = translated_text
+                translated_count += 1
                 final_events.append(event)
+            elif event.text and clean_vtt_tags(event.text):
+                # CRITICAL: If individual line translation failed, NEVER drop the line!
+                # Fall back to cleaned original text so the subtitle is NEVER blank/empty!
+                event.text = clean_vtt_tags(event.text)
+                final_events.append(event)
+
+        print(f"✅ Final Subtitle Yield: {len(final_events)} dialogue lines ({translated_count} translated to Sinhala)", flush=True)
+
+        if not final_events:
+            print("⚠️ Warning: final_events was empty, restoring cleaned_events.", flush=True)
+            final_events = cleaned_events
             
         subs.events = final_events
         subs.save(out_name, encoding="utf-8")
         return out_name
     except Exception as e:
-        print(f"❌ Error: {e}", flush=True)
+        print(f"❌ Error in process_sinhala_sub: {e}", flush=True)
         return None
 
 def process_and_translate_subtitle(video_path):
-    eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt") 
-    extracted_successfully = False
+    sub_type, extracted_path = extract_and_score_subtitles(video_path)
 
-    best_sub_path = extract_and_score_subtitles(video_path)
-    if best_sub_path and os.path.exists(best_sub_path):
-        extracted_successfully = True
-        eng_sub = best_sub_path
+    # 1. If embedded Sinhala sub was already present in video:
+    if sub_type == 'sinhala' and extracted_path and os.path.exists(extracted_path):
+        print("🎉 Using Embedded Sinhala Subtitle directly!", flush=True)
+        return process_sinhala_sub(extracted_path)
 
-    if not extracted_successfully:
-        print("⚠️ Starting AI Audio Transcription as fallback (small model)...", flush=True)
-        audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
-        subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
-        if os.path.exists(audio_path):
-            try:
-                model = WhisperModel("small", device="cpu", compute_type="int8")
-                segments, info = model.transcribe(audio_path, task="translate", vad_filter=True, beam_size=5)
-                subs = pysubs2.SSAFile()
-                for segment in segments:
-                    subs.events.append(pysubs2.SSAEvent(start=int(segment.start * 1000), end=int(segment.end * 1000), text=segment.text.strip()))
+    # 2. If English / other dialogue sub was extracted:
+    if sub_type == 'english' and extracted_path and os.path.exists(extracted_path):
+        return process_sinhala_sub(extracted_path)
+
+    # 3. AI Whisper fallback only if video has NO softsubs at all
+    print("⚠️ No softsubs found in video tracks. Starting AI Audio Transcription fallback...", flush=True)
+    audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
+    eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt")
+    subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
+    if os.path.exists(audio_path):
+        try:
+            model = WhisperModel("small", device="cpu", compute_type="int8")
+            segments, info = model.transcribe(audio_path, task="translate", vad_filter=True, beam_size=5)
+            subs = pysubs2.SSAFile()
+            for segment in segments:
+                t_str = segment.text.strip()
+                if t_str:
+                    subs.events.append(pysubs2.SSAEvent(start=int(segment.start * 1000), end=int(segment.end * 1000), text=t_str))
+            if subs.events:
                 subs.save(eng_sub, encoding="utf-8")
-                extracted_successfully = True
-            except Exception: pass
+                return process_sinhala_sub(eng_sub)
+        except Exception as e:
+            print(f"⚠️ Whisper AI failed: {e}", flush=True)
         
-    if not extracted_successfully: return None
-    return process_sinhala_sub(eng_sub)
+    return None
 
 def get_abyss_token():
     print("🔑 Authenticating with Abyss...", flush=True)
@@ -458,13 +615,42 @@ def upload_video_to_abyss(video_path):
 
 def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
     print("☁️ Uploading Sinhala Subtitle to Abyss...", flush=True)
+    if not srt_path or not os.path.exists(srt_path):
+        print("⚠️ No subtitle file found to upload.", flush=True)
+        return False
+
+    sub_size = os.path.getsize(srt_path)
+    if sub_size < 100:
+        print(f"⚠️ Subtitle file is suspiciously small ({sub_size} bytes). Aborting upload.", flush=True)
+        return False
+
     try:
+        # 1. Delete old/stale Sinhala subtitle from Abyss if present
+        try:
+            list_res = requests.get(f"https://api.abyss.to/v1/subtitles/{vhd_code}/list", headers={'Authorization': f'Bearer {token}'}, timeout=10)
+            if list_res.status_code == 200:
+                for item in list_res.json().get('items', []):
+                    name = (item.get('name') or '').lower()
+                    lang = (item.get('language') or '').lower()
+                    if 'sinhala' in name or 'sinhala' in lang or lang in ['si', 'sin']:
+                        sid = item.get('id')
+                        requests.delete(f"https://api.abyss.to/v1/subtitles/{sid}", headers={'Authorization': f'Bearer {token}'}, timeout=10)
+        except Exception:
+            pass
+
+        # 2. Upload new validated Sinhala subtitle (.srt)
         url = f"https://api.abyss.to/v1/upload/subtitles/{vhd_code}?language=Sinhala&filename=sinhala.srt"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"} 
         with open(srt_path, "rb") as f: sub_data = f.read()
         resp = requests.put(url, headers=headers, data=sub_data, timeout=60)
-        if resp.status_code == 200: print("🎉 Subtitle Attached Successfully!", flush=True)
-    except Exception: pass
+        if resp.status_code in [200, 201]:
+            print(f"🎉 Subtitle Attached Successfully! ({len(sub_data)} bytes)", flush=True)
+            return True
+        else:
+            print(f"⚠️ Abyss sub upload status {resp.status_code}: {resp.text}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Abyss sub upload error: {e}", flush=True)
+    return False
 
 
 # ==========================================
@@ -566,7 +752,13 @@ if original_video:
         
         # සබ් එක Abyss එකට ඇටෑච් කිරීම
         if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
-            upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
+            sub_ok = upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
+            if not sub_ok:
+                print("⚠️ Retrying subtitle upload after 5s...", flush=True)
+                time.sleep(5)
+                upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
+        else:
+            print(f"⚠️ Subtitle attachment skipped (srt_sub_path={srt_sub_path}, exists={os.path.exists(srt_sub_path) if srt_sub_path else False}, jwt_token={'VALID' if jwt_token else 'MISSING'})", flush=True)
             
         # Database එක අප්ඩේට් කිරීම
         update_database(file_code)
