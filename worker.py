@@ -127,6 +127,13 @@ def notify_status(status="failed", file_size=0, file_code=None):
 
 
 def extract_ep_number(filename):
+    # 1. Check parenthesized absolute episode number e.g. (001), (010), (036) as used in Judas batches
+    m_paren = re.search(r'\(0*(\d+)\)', filename)
+    if m_paren:
+        val = int(m_paren.group(1))
+        if 0 < val < 5000:
+            return val
+
     clean = re.sub(r'\[.*?\]|\(.*?\)', ' ', filename.lower())
     clean = re.sub(r'\b(1080p|720p|480p|x264|x265|hevc|10bit|8bit)\b', ' ', clean)
     m = re.search(r'[sS]\d+[eE]0*(\d+)', clean)
