@@ -127,26 +127,38 @@ def notify_status(status="failed", file_size=0, file_code=None):
 
 
 def extract_ep_number(filename):
-    # 1. Check parenthesized absolute episode number e.g. (001), (010), (036) as used in Judas batches
-    m_paren = re.search(r'\(0*(\d+)\)', filename)
-    if m_paren:
-        val = int(m_paren.group(1))
-        if 0 < val < 5000:
-            return val
+    # 1. Clean bracketed tags e.g. [Judas], [1080p], and release years like (2011), (1999)
+    clean = re.sub(r'\(?(19\d{2}|20\d{2})\)?', ' ', filename)
+    clean = re.sub(r'\[.*?\]', ' ', clean)
+    clean = re.sub(r'\b(1080p|720p|480p|2160p|x264|x265|h264|hevc|10bit|8bit|av1)\b', ' ', clean, flags=re.IGNORECASE)
 
-    clean = re.sub(r'\[.*?\]|\(.*?\)', ' ', filename.lower())
-    clean = re.sub(r'\b(1080p|720p|480p|x264|x265|hevc|10bit|8bit)\b', ' ', clean)
+    # 2. Check S01E72 or s1e72
     m = re.search(r'[sS]\d+[eE]0*(\d+)', clean)
     if m: return int(m.group(1))
-    m = re.search(r'\b(?:ep|episode)\.?\s?0*(\d+)\b', clean)
-    if m: return int(m.group(1))
-    m = re.search(r'(?:\s-\s|_|#\s?)0*(\d+)(?:v\d)?(?:\b|_)', clean)
+
+    # 3. Check " - 072" or " - 72" or "_072" or "#72"
+    m = re.search(r'(?:\s-\s|_|#\s?|e)0*(\d{1,4})(?:v\d)?(?:\b|_|\s|\.)', clean, flags=re.IGNORECASE)
     if m: return int(m.group(1))
 
+    # 4. Check Ep. 72 or Episode 72
+    m = re.search(r'\b(?:ep|episode)\.?\s?0*(\d+)\b', clean, flags=re.IGNORECASE)
+    if m: return int(m.group(1))
+
+    # 5. Check parenthesized absolute episode number e.g. (072) or (72)
+    m_paren = re.search(r'\(0*(\d{1,4})\)', clean)
+    if m_paren:
+        val = int(m_paren.group(1))
+        if 0 < val < 2000:
+            return val
+
+    # 6. Fallback after stripping season
     clean_no_season = re.sub(r'\b(?:s|season|series)\s?\d+\b', ' ', clean, flags=re.IGNORECASE)
     clean_no_season = re.sub(r'\b\d+(?:st|nd|rd|th)\s?season\b', ' ', clean_no_season, flags=re.IGNORECASE)
-    m = re.search(r'\b0*(\d+)\b', clean_no_season)
-    if m: return int(m.group(1))
+    numbers = re.findall(r'\b0*(\d{1,4})\b', clean_no_season)
+    if numbers:
+        for num in reversed(numbers):
+            if int(num) < 2000:
+                return int(num)
     return None
 
 def detect_encoding(file_path):
