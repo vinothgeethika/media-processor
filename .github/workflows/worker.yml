@@ -59,4 +59,6 @@ jobs:
           PYTHONUNBUFFERED: 1
           JOB_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python worker.py
