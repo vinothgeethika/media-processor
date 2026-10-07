@@ -44,6 +44,10 @@ fs_db = firestore.client()
 # Bot 1 Database Node
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
 
+# --- 🤖 AI AUDIO TRANSCRIPTION KEYS ---
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+
 payload = json.loads(os.environ.get("JOB_PAYLOAD", "{}"))
 anime_id = payload.get("anilist_id")
 ep_num = payload.get("episode")
@@ -568,6 +572,118 @@ def process_sinhala_sub(sub_path):
         print(f"❌ Error in process_sinhala_sub: {e}", flush=True)
         return None
 
+def transcribe_with_groq(audio_path, out_srt_path):
+    if not GROQ_API_KEY:
+        return False
+    print("⚡ [AI Engine] Transcribing with Groq Cloud (whisper-large-v3)...", flush=True)
+    try:
+        url = "https://api.groq.com/openai/v1/audio/translations"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+        with open(audio_path, "rb") as f:
+            files = {"file": (os.path.basename(audio_path), f, "audio/mpeg")}
+            data = {
+                "model": "whisper-large-v3",
+                "response_format": "verbose_json",
+                "temperature": "0.0"
+            }
+            res = requests.post(url, headers=headers, files=files, data=data, timeout=180)
+            
+        if res.status_code == 200:
+            result = res.json()
+            segments = result.get("segments", [])
+            subs = pysubs2.SSAFile()
+            for seg in segments:
+                t_str = seg.get("text", "").strip()
+                if t_str:
+                    s_ms = int(seg.get("start", 0) * 1000)
+                    e_ms = int(seg.get("end", 0) * 1000)
+                    subs.events.append(pysubs2.SSAEvent(start=s_ms, end=e_ms, text=t_str))
+            if subs.events:
+                subs.save(out_srt_path, encoding="utf-8")
+                print(f"🎉 Groq whisper-large-v3 generated {len(subs.events)} dialogue lines!", flush=True)
+                return True
+        else:
+            print(f"⚠️ Groq API error ({res.status_code}): {res.text[:160]}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Groq transcription failed: {e}", flush=True)
+    return False
+
+def transcribe_with_gemini(audio_path, out_srt_path):
+    if not GEMINI_API_KEY:
+        return False
+    print("🧠 [AI Engine] Transcribing with Google Gemini Flash Multimodal Audio...", flush=True)
+    try:
+        file_size = os.path.getsize(audio_path)
+        upload_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
+        headers = {
+            "X-Goog-Upload-Command": "start, upload, finalize",
+            "X-Goog-Upload-Header-Content-Length": str(file_size),
+            "X-Goog-Upload-Header-Content-Type": "audio/mp3",
+            "Content-Type": "audio/mp3"
+        }
+        with open(audio_path, "rb") as f:
+            up_res = requests.post(upload_url, headers=headers, data=f, timeout=120)
+        
+        if up_res.status_code != 200:
+            print(f"⚠️ Gemini audio upload error: {up_res.text[:150]}", flush=True)
+            return False
+
+        file_uri = up_res.json().get("file", {}).get("uri")
+        if not file_uri:
+            return False
+
+        gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        prompt = (
+            "You are a professional anime subtitle translator. Listen to the Japanese audio track and generate accurate, natural English subtitle lines with standard SRT timestamps.\n"
+            "Strictly output only raw valid SRT format starting with 1. No markdown fences, no conversational text."
+        )
+        body = {
+            "contents": [{
+                "parts": [
+                    {"file_data": {"mime_type": "audio/mp3", "file_uri": file_uri}},
+                    {"text": prompt}
+                ]
+            }],
+            "generationConfig": {"temperature": 0.2}
+        }
+        gen_res = requests.post(gen_url, json=body, timeout=180)
+        if gen_res.status_code == 200:
+            candidates = gen_res.json().get("candidates", [])
+            if candidates:
+                srt_content = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                srt_content = re.sub(r'^```(?:srt)?\n|```$', '', srt_content.strip(), flags=re.MULTILINE)
+                try:
+                    test_subs = pysubs2.SSAFile.from_string(srt_content, format_="srt")
+                    if len(test_subs) > 0:
+                        test_subs.save(out_srt_path, encoding="utf-8")
+                        print(f"🎉 Gemini Flash generated {len(test_subs)} dialogue lines!", flush=True)
+                        return True
+                except Exception:
+                    pass
+        else:
+            print(f"⚠️ Gemini API error ({gen_res.status_code}): {gen_res.text[:160]}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Gemini transcription failed: {e}", flush=True)
+    return False
+
+def transcribe_with_local_whisper(audio_path, out_srt_path):
+    print("🐢 [AI Fallback] Using Local faster-whisper (CPU)...", flush=True)
+    try:
+        model = WhisperModel("small", device="cpu", compute_type="int8")
+        segments, info = model.transcribe(audio_path, task="translate", vad_filter=True, beam_size=5)
+        subs = pysubs2.SSAFile()
+        for segment in segments:
+            t_str = segment.text.strip()
+            if t_str:
+                subs.events.append(pysubs2.SSAEvent(start=int(segment.start * 1000), end=int(segment.end * 1000), text=t_str))
+        if subs.events:
+            subs.save(out_srt_path, encoding="utf-8")
+            print(f"✅ Local faster-whisper generated {len(subs.events)} dialogue lines.", flush=True)
+            return True
+    except Exception as e:
+        print(f"⚠️ Local Whisper AI failed: {e}", flush=True)
+    return False
+
 def process_and_translate_subtitle(video_path):
     sub_type, extracted_path = extract_and_score_subtitles(video_path)
 
@@ -580,25 +696,26 @@ def process_and_translate_subtitle(video_path):
     if sub_type == 'english' and extracted_path and os.path.exists(extracted_path):
         return process_sinhala_sub(extracted_path)
 
-    # 3. AI Whisper fallback only if video has NO softsubs at all
+    # 3. AI Multi-Tier fallback only if video has NO softsubs at all
     print("⚠️ No softsubs found in video tracks. Starting AI Audio Transcription fallback...", flush=True)
     audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
     eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt")
-    subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', audio_path, '-y'], stderr=subprocess.DEVNULL)
-    if os.path.exists(audio_path):
-        try:
-            model = WhisperModel("small", device="cpu", compute_type="int8")
-            segments, info = model.transcribe(audio_path, task="translate", vad_filter=True, beam_size=5)
-            subs = pysubs2.SSAFile()
-            for segment in segments:
-                t_str = segment.text.strip()
-                if t_str:
-                    subs.events.append(pysubs2.SSAEvent(start=int(segment.start * 1000), end=int(segment.end * 1000), text=t_str))
-            if subs.events:
-                subs.save(eng_sub, encoding="utf-8")
-                return process_sinhala_sub(eng_sub)
-        except Exception as e:
-            print(f"⚠️ Whisper AI failed: {e}", flush=True)
+    
+    # Extract audio in optimized 16kHz mono 48k mp3 (compact ~7MB size, ideal for speech recognition)
+    subprocess.run([
+        'ffmpeg', '-i', video_path, '-vn',
+        '-ac', '1', '-ar', '16000', '-b:a', '48k',
+        audio_path, '-y'
+    ], stderr=subprocess.DEVNULL)
+
+    if os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000:
+        success = (
+            transcribe_with_groq(audio_path, eng_sub) or
+            transcribe_with_gemini(audio_path, eng_sub) or
+            transcribe_with_local_whisper(audio_path, eng_sub)
+        )
+        if success and os.path.exists(eng_sub):
+            return process_sinhala_sub(eng_sub)
         
     return None
 

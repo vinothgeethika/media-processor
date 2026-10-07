@@ -68,6 +68,8 @@ Add the following secret keys under your GitHub Repository **Settings -> Secrets
 | :--- | :--- | :--- |
 | `FIREBASE_JSON` | Full contents of your `serviceAccountKey.json` | `{ "type": "service_account", ... }` |
 | `FIREBASE_DB_URL` | Firebase Realtime Database URL | `https://anishift-5d14b-default-rtdb.firebaseio.com` |
+| `GROQ_API_KEY` | *(Recommended for Studio Subtitles)* Free API key from [Groq Console](https://console.groq.com) | `gsk_...` |
+| `GEMINI_API_KEY` | *(Optional Backup AI)* Free Google Gemini API Key | `AIzaSy...` |
 | `ABYSS_API_KEY` | *(Optional Fallback)* Default Abyss API Key | `19136c9e1c8d...` |
 | `ABYSS_EMAIL` | *(Optional Fallback)* Abyss Account Email | `account@gmail.com` |
 | `ABYSS_PASSWORD` | *(Optional Fallback)* Abyss Account Password | `********` |
