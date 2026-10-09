@@ -82,8 +82,8 @@ def update_env_repo(new_repo_full, env_file_path=None):
     os.environ["SUB_GITHUB_REPO"] = new_repo_full
 
 def get_github_credentials(caller_env=None):
-    token = payload.get("github_token") or os.getenv("GITHUB_TOKEN") or os.getenv("SUB_GITHUB_TOKEN") or os.getenv("GITHUB_PAT")
-    repo = payload.get("github_repo") or os.getenv("SUB_GITHUB_REPO") or os.getenv("GITHUB_REPO")
+    token = payload.get("github_token") or (payload.get("abyss") or {}).get("github_token") or os.getenv("GITHUB_TOKEN") or os.getenv("SUB_GITHUB_TOKEN") or os.getenv("GITHUB_PAT")
+    repo = payload.get("github_repo") or (payload.get("abyss") or {}).get("github_repo") or os.getenv("SUB_GITHUB_REPO") or os.getenv("GITHUB_REPO")
 
     if not token or not repo:
         try:
