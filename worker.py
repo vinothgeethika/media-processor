@@ -17,6 +17,13 @@ import concurrent.futures
 import random
 from deep_translator import GoogleTranslator
 
+import threading
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # --- 🗣️ SPOKEN SINHALA DICTIONARY ---
 try:
     from spoken_dict import SPOKEN_DICT
@@ -43,6 +50,208 @@ fs_db = firestore.client()
 
 # Bot 1 Database Node
 RTDB_WORKER_FEEDBACK = "worker_job_status_short"
+
+# =====================================================================
+# 🚀 GITHUB RELEASES DDL UPLOADER & AUTO-REPO ROTATION
+# =====================================================================
+_github_lock = threading.Lock()
+
+def update_env_repo(new_repo_full, env_file_path=None):
+    """Rewrites GITHUB_REPO in .env if present and updates os.environ."""
+    candidates = [env_file_path] if env_file_path else [".env"]
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            try:
+                with open(cand, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                found = False
+                with open(cand, "w", encoding="utf-8") as f:
+                    for line in lines:
+                        stripped = line.strip()
+                        if stripped.startswith("GITHUB_REPO=") or stripped.startswith("GITHUB_REPO ="):
+                            f.write(f'GITHUB_REPO="{new_repo_full}"\n')
+                            found = True
+                        else:
+                            f.write(line)
+                    if not found:
+                        f.write(f'\nGITHUB_REPO="{new_repo_full}"\n')
+                print(f"[GITHUB-STORAGE] 📝 Auto-updated {cand} with new Repo: {new_repo_full}", flush=True)
+            except Exception as e:
+                print(f"[GITHUB-STORAGE] ⚠️ Failed to update .env: {e}", flush=True)
+    os.environ["GITHUB_REPO"] = new_repo_full
+    os.environ["SUB_GITHUB_REPO"] = new_repo_full
+
+def get_github_credentials(caller_env=None):
+    token = payload.get("github_token") or os.getenv("GITHUB_TOKEN") or os.getenv("SUB_GITHUB_TOKEN") or os.getenv("GITHUB_PAT")
+    repo = payload.get("github_repo") or os.getenv("SUB_GITHUB_REPO") or os.getenv("GITHUB_REPO")
+
+    if not token or not repo:
+        try:
+            if os.path.exists(".env"):
+                load_dotenv(".env", override=False)
+                token = token or os.getenv("GITHUB_TOKEN") or os.getenv("SUB_GITHUB_TOKEN") or os.getenv("GITHUB_PAT")
+                repo = repo or os.getenv("SUB_GITHUB_REPO") or os.getenv("GITHUB_REPO")
+        except Exception: pass
+
+    # Check Firebase RTDB for auto-rotated active repository
+    try:
+        from firebase_admin import db as rtdb
+        active_vault = rtdb.reference("config/active_sub_vault").get()
+        if active_vault and isinstance(active_vault, str) and "/" in active_vault:
+            repo = active_vault.strip('"\'').strip()
+    except Exception:
+        pass
+
+    token = token or os.getenv("GITHUB_TOKEN", "")
+    repo = repo or os.getenv("GITHUB_REPO", "Anishift-svr/sub-vault-160633")
+    if token: token = token.strip('"\'').strip()
+    if repo: repo = repo.strip('"\'').strip()
+    return token, repo
+
+def create_new_github_repo(token, caller_env=None):
+    """
+    Auto-create a new repository on GitHub when storage/upload limit is reached
+    and syncs to RTDB config/active_sub_vault.
+    """
+    with _github_lock:
+        if not token:
+            print("[GITHUB-STORAGE] ❌ Cannot auto-create repo: No GitHub token provided.", flush=True)
+            return None
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        username = "Anishift-svr"
+        try:
+            u_res = requests.get("https://api.github.com/user", headers=headers, timeout=10)
+            if u_res.status_code == 200:
+                username = u_res.json().get("login", username)
+        except Exception: pass
+
+        new_repo_name = f"sub-vault-{uuid.uuid4().hex[:6]}"
+        print(f"[GITHUB-STORAGE] ⚙️ Limit reached. Creating NEW GitHub Repository: {new_repo_name}...", flush=True)
+        repo_data = {"name": new_repo_name, "private": False, "auto_init": True}
+        r = requests.post("https://api.github.com/user/repos", headers=headers, json=repo_data, timeout=20)
+        if r.status_code in [200, 201]:
+            new_full_repo = f"{username}/{new_repo_name}"
+            update_env_repo(new_full_repo)
+            try:
+                from firebase_admin import db as rtdb
+                rtdb.reference("config/active_sub_vault").set(new_full_repo)
+                print(f"[GITHUB-STORAGE] 🌐 Synced new repo '{new_full_repo}' to Firebase RTDB config/active_sub_vault", flush=True)
+            except Exception:
+                pass
+            time.sleep(2)
+            return new_full_repo
+        else:
+            print(f"[GITHUB-STORAGE] ❌ Failed to create new GitHub repo: {r.status_code} - {r.text}", flush=True)
+            return None
+
+def upload_to_github_release(file_path, asset_name="Sinhala.srt", release_context=None, max_retries=2):
+    """
+    Upload subtitle file to GitHub Releases as a Direct Download Link (DDL).
+    Ensures filename in download URL is strictly asset_name ('Sinhala.srt' or 'English.srt').
+    Groups both Sinhala and English under the same release tag via release_context.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return None
+    try:
+        if os.path.getsize(file_path) == 0:
+            print(f"[GITHUB-STORAGE] ⚠️ Subtitle file is empty: {file_path}", flush=True)
+            return None
+    except Exception: return None
+
+    token, repo = get_github_credentials()
+    if not token or not repo:
+        print(f"[GITHUB-STORAGE] ⚠️ Missing GitHub Token or Repo (token={'SET' if token else 'EMPTY'}, repo={repo})", flush=True)
+        return None
+
+    for attempt in range(max_retries):
+        try:
+            release_id = None
+            upload_url_base = None
+
+            # Check if release_context already contains a valid release on the current repo
+            if release_context is not None and isinstance(release_context, dict):
+                if release_context.get("repo") == repo:
+                    release_id = release_context.get("release_id")
+                    upload_url_base = release_context.get("upload_url")
+                else:
+                    release_context.clear()
+
+            # Create a dedicated release tag for this episode if not already existing
+            if not release_id or not upload_url_base:
+                tag_name = f"sub-{uuid.uuid4().hex[:8]}"
+                rel_api = f"https://api.github.com/repos/{repo}/releases"
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "Anishift-SubEngine"
+                }
+                rel_payload = {
+                    "tag_name": tag_name,
+                    "name": f"Subtitle Storage {tag_name}",
+                    "draft": False,
+                    "prerelease": False
+                }
+                r_rel = requests.post(rel_api, headers=headers, json=rel_payload, timeout=20)
+                if r_rel.status_code in [200, 201]:
+                    rel_json = r_rel.json()
+                    release_id = rel_json.get("id")
+                    raw_upload = rel_json.get("upload_url", "")
+                    upload_url_base = raw_upload.split("{")[0] if "{" in raw_upload else raw_upload
+                    if release_context is not None and isinstance(release_context, dict):
+                        release_context["release_id"] = release_id
+                        release_context["upload_url"] = upload_url_base
+                        release_context["repo"] = repo
+                        release_context["tag"] = tag_name
+                else:
+                    print(f"[GITHUB-STORAGE] ⚠️ Release creation failed ({r_rel.status_code}) on repo {repo}. Rotating repo...", flush=True)
+                    new_repo = create_new_github_repo(token)
+                    if new_repo:
+                        repo = new_repo
+                    continue
+
+            # Upload asset with exact asset_name (e.g. Sinhala.srt or English.srt)
+            upload_target = f"{upload_url_base}?name={asset_name}"
+            upload_headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "text/plain; charset=utf-8",
+                "User-Agent": "Anishift-SubEngine"
+            }
+            with open(file_path, "rb") as f:
+                r_up = requests.post(upload_target, headers=upload_headers, data=f, timeout=60)
+
+            if r_up.status_code == 201:
+                dl_url = r_up.json().get("browser_download_url")
+                print(f"[GITHUB-STORAGE] ✅ GitHub DDL Upload Success [{asset_name}]: {dl_url}", flush=True)
+                return dl_url
+            elif r_up.status_code == 422 and "already_exists" in r_up.text:
+                if release_context is not None and isinstance(release_context, dict):
+                    release_context.pop("release_id", None)
+                    release_context.pop("upload_url", None)
+                continue
+            else:
+                print(f"[GITHUB-STORAGE] ⚠️ Asset upload failed ({r_up.status_code}): {r_up.text}. Rotating repo...", flush=True)
+                new_repo = create_new_github_repo(token)
+                if new_repo:
+                    repo = new_repo
+                    if release_context is not None and isinstance(release_context, dict):
+                        release_context.pop("release_id", None)
+                        release_context.pop("upload_url", None)
+                continue
+
+        except Exception as e:
+            print(f"[GITHUB-STORAGE] ❌ GitHub upload error: {e}", flush=True)
+            new_repo = create_new_github_repo(token)
+            if new_repo:
+                repo = new_repo
+                if release_context is not None and isinstance(release_context, dict):
+                    release_context.pop("release_id", None)
+                    release_context.pop("upload_url", None)
+
+    return None
+
 
 # --- 🤖 AI AUDIO TRANSCRIPTION KEYS ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
@@ -104,6 +313,7 @@ def notify_status(status="failed", file_size=0, file_code=None):
             "account_name": ABYSS_ACCOUNT_NAME,
             "timestamp": time.time()
         }
+
         # 1. Direct REST PUT to Dedicated RTDB (0% Firestore reads, high reliability)
         if DEDICATED_RTDB_URL:
             try:
@@ -118,14 +328,6 @@ def notify_status(status="failed", file_size=0, file_code=None):
         # 2. Legacy firebase_admin SDK update if available
         try:
             db.reference(RTDB_WORKER_FEEDBACK).child(job_key).set(fb_data)
-            db.reference(RTDB_WORKER_FEEDBACK).update({
-                "status": status,
-                "anilist_id": str(anime_id),
-                "episode": int(ep_num),
-                "file_size": file_size,
-                "file_code": file_code,
-                "timestamp": time.time()
-            })
         except Exception: pass
     except: pass
 
@@ -460,36 +662,37 @@ def extract_and_score_subtitles(video_path):
                 try: os.remove(temp_sub)
                 except: pass
 
-    # 1. If an existing Sinhala sub is found, use it directly!
+    # 1. Identify best Sinhala and best English tracks
+    si_winner_path = None
+    en_winner_path = None
+
     if si_candidates:
         si_candidates.sort(key=lambda x: x['score'], reverse=True)
-        winner = si_candidates[0]
-        print(f"🏆 WINNER (Embedded Sinhala): Track '{winner['name']}' with {winner['lines']} lines!", flush=True)
-        winner_path = os.path.join(TEMP_SUB_DIR, "winner_sinhala.srt")
-        os.rename(winner['path'], winner_path)
-        for c in si_candidates[1:] + other_candidates:
+        winner_si = si_candidates[0]
+        print(f"🏆 WINNER (Embedded Sinhala): Track '{winner_si['name']}' with {winner_si['lines']} lines!", flush=True)
+        si_winner_path = os.path.join(TEMP_SUB_DIR, "winner_sinhala.srt")
+        os.rename(winner_si['path'], si_winner_path)
+        for c in si_candidates[1:]:
             if os.path.exists(c['path']):
                 try: os.remove(c['path'])
                 except: pass
-        return 'sinhala', winner_path
 
-    # 2. If translation source (English) is found, return it for translation!
     if other_candidates:
         other_candidates.sort(key=lambda x: x['score'], reverse=True)
-        winner = other_candidates[0]
-        print(f"🏆 WINNER (Translation Source): Track '{winner['name']}' with {winner['lines']} lines (Score: {winner['score']})!", flush=True)
-        winner_path = os.path.join(TEMP_SUB_DIR, "extracted.srt")
-        os.rename(winner['path'], winner_path)
+        winner_other = other_candidates[0]
+        print(f"🏆 WINNER (Translation/English Track): Track '{winner_other['name']}' with {winner_other['lines']} lines (Score: {winner_other['score']})!", flush=True)
+        en_winner_path = os.path.join(TEMP_SUB_DIR, "extracted.srt")
+        os.rename(winner_other['path'], en_winner_path)
         for c in other_candidates[1:]:
             if os.path.exists(c['path']):
                 try: os.remove(c['path'])
                 except: pass
-        return 'english', winner_path
 
-    return None, None
+    return si_winner_path, en_winner_path
 
-def process_sinhala_sub(sub_path):
-    out_name = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
+def process_sinhala_sub(sub_path, out_name=None):
+    if not out_name:
+        out_name = os.path.join(TEMP_SUB_DIR, "sinhala_sub.srt")
     try:
         print("🧹 Cleaning dialogs & unwanted lines...", flush=True)
         try: subs = pysubs2.load(sub_path, encoding=detect_encoding(sub_path))
@@ -684,40 +887,81 @@ def transcribe_with_local_whisper(audio_path, out_srt_path):
         print(f"⚠️ Local Whisper AI failed: {e}", flush=True)
     return False
 
-def process_and_translate_subtitle(video_path):
-    sub_type, extracted_path = extract_and_score_subtitles(video_path)
+def process_english_sub(sub_path, out_name=None):
+    if not sub_path or not os.path.exists(sub_path):
+        return None
+    try:
+        print("🧹 Cleaning English subtitle...", flush=True)
+        try: subs = pysubs2.load(sub_path, encoding=detect_encoding(sub_path))
+        except: subs = pysubs2.load(sub_path, encoding='latin-1')
+
+        cleaned_events = []
+        bad_words = ['subtitle by', 'translated by', 'sync by', 'encoded by', 'www.', '.com', 'discord', 'telegram', 'anishift']
+        for e in subs:
+            if is_garbage_sub(e.text): continue
+            txt = clean_vtt_tags(e.text)
+            t_low = txt.lower()
+            if any(x in t_low for x in bad_words) or len(txt) > 300 or not has_letters(txt): continue
+            e.text = txt
+            cleaned_events.append(e)
+
+        if not cleaned_events:
+            cleaned_events = [e for e in subs if e.text and clean_vtt_tags(e.text)]
+            if not cleaned_events:
+                return None
+
+        subs.events = cleaned_events
+        if not out_name:
+            out_name = os.path.join(TEMP_SUB_DIR, "english_sub.srt")
+        subs.save(out_name, encoding="utf-8")
+        print(f"✅ English Subtitle Cleaned: {len(cleaned_events)} dialogue lines ({out_name})", flush=True)
+        return out_name
+    except Exception as e:
+        print(f"⚠️ process_english_sub error: {e}", flush=True)
+        return None
+
+def process_and_translate_subtitles(video_path):
+    si_raw_path, en_raw_path = extract_and_score_subtitles(video_path)
+
+    final_si_path = None
+    final_en_path = None
 
     # 1. If embedded Sinhala sub was already present in video:
-    if sub_type == 'sinhala' and extracted_path and os.path.exists(extracted_path):
+    if si_raw_path and os.path.exists(si_raw_path):
         print("🎉 Using Embedded Sinhala Subtitle directly!", flush=True)
-        return process_sinhala_sub(extracted_path)
+        final_si_path = process_sinhala_sub(si_raw_path)
 
     # 2. If English / other dialogue sub was extracted:
-    if sub_type == 'english' and extracted_path and os.path.exists(extracted_path):
-        return process_sinhala_sub(extracted_path)
+    if en_raw_path and os.path.exists(en_raw_path):
+        final_en_path = process_english_sub(en_raw_path)
+        if not final_si_path:
+            print("🔄 Translating English subtitle track to Sinhala...", flush=True)
+            final_si_path = process_sinhala_sub(en_raw_path)
 
     # 3. AI Multi-Tier fallback only if video has NO softsubs at all
-    print("⚠️ No softsubs found in video tracks. Starting AI Audio Transcription fallback...", flush=True)
-    audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
-    eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt")
-    
-    # Extract audio in optimized 16kHz mono 48k mp3 (compact ~7MB size, ideal for speech recognition)
-    subprocess.run([
-        'ffmpeg', '-i', video_path, '-vn',
-        '-ac', '1', '-ar', '16000', '-b:a', '48k',
-        audio_path, '-y'
-    ], stderr=subprocess.DEVNULL)
-
-    if os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000:
-        success = (
-            transcribe_with_groq(audio_path, eng_sub) or
-            transcribe_with_gemini(audio_path, eng_sub) or
-            transcribe_with_local_whisper(audio_path, eng_sub)
-        )
-        if success and os.path.exists(eng_sub):
-            return process_sinhala_sub(eng_sub)
+    if not final_si_path and not final_en_path:
+        print("⚠️ No softsubs found in video tracks. Starting AI Audio Transcription fallback...", flush=True)
+        audio_path = os.path.join(TEMP_SUB_DIR, "audio.mp3")
+        eng_sub = os.path.join(TEMP_SUB_DIR, "extracted.srt")
         
-    return None
+        # Extract audio in optimized 16kHz mono 48k mp3 (compact ~7MB size, ideal for speech recognition)
+        subprocess.run([
+            'ffmpeg', '-i', video_path, '-vn',
+            '-ac', '1', '-ar', '16000', '-b:a', '48k',
+            audio_path, '-y'
+        ], stderr=subprocess.DEVNULL)
+
+        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000:
+            success = (
+                transcribe_with_groq(audio_path, eng_sub) or
+                transcribe_with_gemini(audio_path, eng_sub) or
+                transcribe_with_local_whisper(audio_path, eng_sub)
+            )
+            if success and os.path.exists(eng_sub):
+                final_en_path = process_english_sub(eng_sub)
+                final_si_path = process_sinhala_sub(eng_sub)
+            
+    return final_si_path, final_en_path
 
 def get_abyss_token():
     print("🔑 Authenticating with Abyss...", flush=True)
@@ -794,8 +1038,8 @@ def upload_subtitle_to_abyss_api(vhd_code, srt_path, token):
 # ==========================================
 # 💾 FIRESTORE UPDATE (Abyss Only)
 # ==========================================
-def update_database(file_code):
-    print("💾 Updating Firestore with Abyss link...", flush=True)
+def update_database(file_code, github_si=None, github_en=None):
+    print("💾 Updating Firestore with Abyss link and Subtitles...", flush=True)
     ep_doc_id = f"episode_{int(ep_num):04d}" if str(ep_num).isdigit() else f"episode_{ep_num}"
     
     data = {
@@ -810,10 +1054,21 @@ def update_database(file_code):
         'last_updated': firestore.SERVER_TIMESTAMP
     }
     
+    if github_si:
+        data['subtitles'] = {
+            'sinhala': github_si,
+            'english': github_en if github_en else 'not_found'
+        }
+    elif github_en:
+        data['subtitles'] = {
+            'sinhala': 'not_found',
+            'english': github_en
+        }
+        
     col_name = 'anime_movies' if (category == 'movie' or job_type == 'movie') else 'anime_series'
     try:
         fs_db.collection(col_name).document(str(anime_id)).collection('episodes').document(ep_doc_id).set(data, merge=True)
-        print(f"✅ Firestore Updated in {col_name}!", flush=True)
+        print(f"✅ Firestore Updated in {col_name}! (SI: {github_si} | EN: {github_en})", flush=True)
     except Exception as e:
         print(f"⚠️ Firestore update error: {e}", flush=True)
 
@@ -834,7 +1089,7 @@ def cleanup_temp_files():
 original_video = download_video()
 
 if original_video:
-    srt_sub_path = process_and_translate_subtitle(original_video)
+    si_sub_path, en_sub_path = process_and_translate_subtitles(original_video)
     jwt_token = get_abyss_token()
     
     print("✂️ Processing Dual-Audio & removing internal subtitles...", flush=True)
@@ -889,20 +1144,33 @@ if original_video:
         file_code, file_size = upload_result
         
         # සබ් එක Abyss එකට ඇටෑච් කිරීම
-        if srt_sub_path and os.path.exists(srt_sub_path) and jwt_token:
-            sub_ok = upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
+        if si_sub_path and os.path.exists(si_sub_path) and jwt_token:
+            sub_ok = upload_subtitle_to_abyss_api(file_code, si_sub_path, jwt_token)
             if not sub_ok:
                 print("⚠️ Retrying subtitle upload after 5s...", flush=True)
                 time.sleep(5)
-                upload_subtitle_to_abyss_api(file_code, srt_sub_path, jwt_token)
+                upload_subtitle_to_abyss_api(file_code, si_sub_path, jwt_token)
         else:
-            print(f"⚠️ Subtitle attachment skipped (srt_sub_path={srt_sub_path}, exists={os.path.exists(srt_sub_path) if srt_sub_path else False}, jwt_token={'VALID' if jwt_token else 'MISSING'})", flush=True)
+            print(f"⚠️ Subtitle attachment skipped (si_sub_path={si_sub_path}, exists={os.path.exists(si_sub_path) if si_sub_path else False}, jwt_token={'VALID' if jwt_token else 'MISSING'})", flush=True)
+
+        # 🚀 Upload Subtitles to GitHub Releases (DDL)
+        rel_ctx = {}
+        github_si = None
+        github_en = None
+
+        if si_sub_path and os.path.exists(si_sub_path):
+            print("🚀 Uploading Sinhala Subtitle to GitHub Releases (DDL)...", flush=True)
+            github_si = upload_to_github_release(si_sub_path, asset_name="Sinhala.srt", release_context=rel_ctx)
+
+        if en_sub_path and os.path.exists(en_sub_path):
+            print("🚀 Uploading English Subtitle to GitHub Releases (DDL)...", flush=True)
+            github_en = upload_to_github_release(en_sub_path, asset_name="English.srt", release_context=rel_ctx)
             
-        # Database එක අප්ඩේට් කිරීම
-        update_database(file_code)
+        # Database එක අප්ඩේට් කිරීම (Firestore එකට direct DDL links save වේ)
+        update_database(file_code, github_si=github_si, github_en=github_en)
         
         notify_status("success", file_size, file_code=file_code)
-        print("🎉 WORKER COMPLETED SUCCESSFULLY (Abyss Upload Only)!", flush=True)
+        print(f"🎉 WORKER COMPLETED SUCCESSFULLY! Abyss: {file_code} | SI: {github_si} | EN: {github_en}", flush=True)
         cleanup_temp_files()
         sys.exit(0)
     else:
